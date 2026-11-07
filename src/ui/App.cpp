@@ -14,6 +14,7 @@
 #include "core/SystemStats.h"
 #include "core/Thumbnailer.h"
 #include "core/Toast.h"
+#include "core/Bookmarks.h"
 #include "core/Tray.h"
 #include "core/Util.h"
 #include "core/Window.h"
@@ -60,6 +61,11 @@ struct App::Impl {
     Hotkeys hotkeys;
     Tray tray;
     Toasts toasts;
+    // Bookmarks: marks in wall-clock time, matched to clips when they're saved.
+    BookmarkLog marks;
+    double lastMarkAt = -10.0, lastSaveAt = 0.0, recStartAt = 0.0, recStopAt = 0.0;
+    bool lastMarkSaved = false;
+    void OnBookmarkHotkey();
     Thumbnailer thumbs;
     Filmstrips strips;
     ImageCache images;
@@ -790,7 +796,18 @@ void App::Impl::ProcessKeyCapture()
             ui.audioDirty = true;
             ui.engineDirty = true;
         } else if (slot < kHotkeyCount) {
-            settings.hotkeys[(size_t)slot] = kc.cleared ? Hotkey{} : Hotkey{ kc.vk, kc.mods };
+            const Hotkey k = kc.cleared ? Hotkey{} : Hotkey{ kc.vk, kc.mods };
+            settings.hotkeys[(size_t)slot] = k;
+            // Conflicts: a key can only do one thing. Take it off the other action and say so.
+            if (k.vk)
+                for (int j = 0; j < kHotkeyCount; ++j)
+                    if (j != slot && settings.hotkeys[(size_t)j] == k) {
+                        settings.hotkeys[(size_t)j] = Hotkey{};
+                        Snack(ui, std::string("That key was used for \"") + HotkeyActionLabel((HotkeyAction)j) + "\", so it's been removed from there.");
+                    }
+            if (k.vk && settings.audio.pushToTalk && settings.audio.pushToTalkKey == k.vk && !k.mods) {
+                Snack(ui, "That key is also your push-to-talk key: both will happen when you press it.");
+            }
         }
         ui.settingsDirty = true;
     }
@@ -902,16 +919,51 @@ void App::Impl::OnHotkey(HotkeyAction a)
     case HotkeyAction::Screenshot: TakeScreenshot(ShotMode::FullScreen, false); break;
     case HotkeyAction::ScreenshotRegion: TakeScreenshot(ShotMode::Region, false); break;
     case HotkeyAction::ScreenshotWindow: TakeScreenshot(ShotMode::ActiveWindow, false); break;
+    case HotkeyAction::Bookmark: OnBookmarkHotkey(); break;
     default: break;
     }
 }
 
-void App::Impl::SaveReplay() { engine->SaveClip(0, CurrentGame()); }
+// Tap: mark the moment. Double tap (within 400 ms): mark and save a clip. Repeats within a
+// second are ignored, so a held or bouncing key doesn't flood the timeline.
+void App::Impl::OnBookmarkHotkey()
+{
+    const double now = NowSeconds();
+    const engine::EngineStatus st = engine->Status();
+    const bool live = st.recording || st.buffer == engine::BufferState::Filling || st.buffer == engine::BufferState::Ready;
+    if (!live) {
+        Toast(ToastKind::Info, "Nothing to bookmark", "Turn on the replay buffer or start a recording first", ICON_INFO);
+        return;
+    }
+    const double since = now - lastMarkAt;
+    if (since < 0.4 && !lastMarkSaved) {
+        lastMarkSaved = true;
+        SaveReplay();
+        return;   // the "Clip saved" toast follows
+    }
+    if (since < 1.0) return;
+    lastMarkAt = now;
+    lastMarkSaved = false;
+    marks.Add(now, ToUtf8(CurrentGame()));
+    Sound(platform::Sound::Bookmark);
+    const std::string when = st.recording ? FormatDuration(st.recordingSeconds) + " into the recording" : TimeOfDayText();
+    Toast(ToastKind::Info, "Marked \xC2\xB7 " + when, "Tap twice to save a clip", ICON_BOOKMARK);
+}
+
+void App::Impl::SaveReplay()
+{
+    lastSaveAt = NowSeconds();
+    engine->SaveClip(0, CurrentGame());
+}
 
 void App::Impl::ToggleRecording()
 {
-    if (engine->Status().recording) engine->StopRecording();
-    else engine->StartRecording(CurrentGame());
+    if (engine->Status().recording) {
+        recStopAt = NowSeconds();
+        engine->StopRecording();
+    } else {
+        engine->StartRecording(CurrentGame());
+    }
 }
 
 void App::Impl::ToggleBuffer(bool announce)
@@ -998,6 +1050,15 @@ void App::Impl::OnEngineEvent(const engine::EngineEvent& e)
     switch (e.type) {
     case T::ClipSaved: {
         Sound(platform::Sound::ClipSaved);
+        // Bookmarks inside the clip go into its sidecar file. A saved clip ends when Save was
+        // pressed; a recording runs from its start to its stop.
+        if (!e.path.empty()) {
+            const bool rec = e.message == "Recording";
+            const double end = rec ? (recStopAt > recStartAt ? recStopAt : NowSeconds()) : lastSaveAt;
+            const double start = rec ? recStartAt : end - e.seconds;
+            std::vector<Bookmark> inside = marks.Range(start, end + 0.25);
+            if (!inside.empty()) SaveBookmarks(e.path, inside);
+        }
         const std::string title = std::string(e.message == "Recording" ? "Recording saved" : "Clip saved") + " \xC2\xB7 " + FormatDuration(e.seconds);
         const std::string game = e.path.empty() ? std::string() : GameFromPath(e.path);
         if (!e.path.empty()) {
@@ -1017,6 +1078,7 @@ void App::Impl::OnEngineEvent(const engine::EngineEvent& e)
         break;
     }
     case T::RecordingStarted:
+        recStartAt = NowSeconds();
         Sound(platform::Sound::RecordStart);
         Toast(ToastKind::Recording, "Recording", "Press " + HotkeyText(MakeContext(), HotkeyAction::ToggleRecording) + " to stop", ICON_RECORD);
         break;

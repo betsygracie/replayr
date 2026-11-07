@@ -90,6 +90,7 @@ set(CS_SOURCES
     src/core/Toast.cpp
     src/core/Thumbnailer.cpp
     src/core/ClipLibrary.cpp
+    src/core/Bookmarks.cpp
     src/core/MediaPlayer.cpp
     src/core/Screenshot.cpp
     src/core/SystemStats.cpp

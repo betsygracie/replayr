@@ -874,6 +874,7 @@ const char* HotkeyHelp(HotkeyAction a)
     case HotkeyAction::Screenshot: return "Captures the display your game is on.";
     case HotkeyAction::ScreenshotRegion: return "Freezes the screen so you can drag out an area.";
     case HotkeyAction::ScreenshotWindow: return "Captures just the active window.";
+    case HotkeyAction::Bookmark: return "Marks the moment so you can jump to it in the editor. Tap twice quickly to mark and save a clip.";
     default: return "";
     }
 }

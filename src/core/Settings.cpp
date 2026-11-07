@@ -23,6 +23,7 @@ const char* HotkeyActionLabel(HotkeyAction a)
     case HotkeyAction::Screenshot: return "Screenshot (full screen)";
     case HotkeyAction::ScreenshotRegion: return "Screenshot (region)";
     case HotkeyAction::ScreenshotWindow: return "Screenshot (active window)";
+    case HotkeyAction::Bookmark: return "Bookmark a moment";
     default: return "?";
     }
 }
@@ -36,6 +37,7 @@ const char* HotkeyActionKey(HotkeyAction a)
     case HotkeyAction::Screenshot: return "screenshot";
     case HotkeyAction::ScreenshotRegion: return "screenshotRegion";
     case HotkeyAction::ScreenshotWindow: return "screenshotWindow";
+    case HotkeyAction::Bookmark: return "bookmark";
     default: return "unknown";
     }
 }
@@ -50,6 +52,7 @@ std::array<Hotkey, kHotkeyCount> Settings::DefaultHotkeys()
     h[(int)HotkeyAction::Screenshot] = { 0x70, kModAlt };                        // Alt+F1
     h[(int)HotkeyAction::ScreenshotRegion] = { 0x2C, kModCtrl };                 // Ctrl+PrtSc
     h[(int)HotkeyAction::ScreenshotWindow] = { 0x70, kModAlt | kModShift };      // Alt+Shift+F1
+    h[(int)HotkeyAction::Bookmark] = { 0x77, 0 };                                // F8 (double-tap: mark + save)
     return h;
 }
 
@@ -211,6 +214,10 @@ bool LoadSettings(const std::wstring& path, Settings& s, std::string* error)
         Get(e, "exportQuality", s.editor.exportQuality);
         Get(e, "loopSelection", s.editor.loopSelection);
         Get(e, "volume", s.editor.volume);
+        Get(e, "trimBefore", s.editor.trimBefore);
+        Get(e, "trimAfter", s.editor.trimAfter);
+        s.editor.trimBefore = Clamp(s.editor.trimBefore, 1, 120);
+        s.editor.trimAfter = Clamp(s.editor.trimAfter, 0, 120);
         s.editor.exportQuality = Clamp(s.editor.exportQuality, 0, 2);
     }
     if (j.contains("banner")) {
@@ -326,6 +333,7 @@ std::string SerializeSettings(const Settings& s)
     };
     j["editor"] = {
         { "exportQuality", s.editor.exportQuality }, { "loopSelection", s.editor.loopSelection }, { "volume", s.editor.volume },
+        { "trimBefore", s.editor.trimBefore }, { "trimAfter", s.editor.trimAfter },
     };
     j["banner"] = {
         { "enabled", s.banner.enabled }, { "corner", s.banner.corner }, { "mode", s.banner.mode }, { "screenshots", s.banner.screenshots },

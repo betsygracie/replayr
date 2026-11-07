@@ -1,4 +1,5 @@
 #pragma once
+#include "core/Bookmarks.h"
 #include "core/ClipLibrary.h"
 #include "core/Platform.h"
 #include "core/Settings.h"
@@ -125,6 +126,11 @@ struct EditorState {
     float gain = 1.0f;               // 0 .. 2
     bool fadeIn = false, fadeOut = false;
     std::vector<EditLane> lanes;     // sized from the clip's audio once it's loaded
+    std::vector<Bookmark> marks;     // the clip's bookmarks (sidecar file), in source time
+    std::wstring marksFor;           // path the marks were loaded for
+    int selMark = -1;
+    bool openMarkRename = false;
+    char markLabel[64] = {};
     bool keepTracks = false;         // export: the mix plus each lane as its own track
     double lastMouseMove = 0.0;
     char title[256] = {};

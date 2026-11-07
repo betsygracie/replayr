@@ -213,6 +213,49 @@ void DrawBannerPreview(AppContext& ctx, ImVec2 ia, float scale, int vw, int vh, 
 std::vector<float> LaneGains(const EditorState& e);
 bool LanesChanged(const EditorState& e);
 
+// Bookmarks are saved to the clip's sidecar file as soon as they change.
+void SaveMarks(EditorState& e)
+{
+    std::sort(e.marks.begin(), e.marks.end(), [](const Bookmark& a, const Bookmark& b) { return a.t < b.t; });
+    SaveBookmarks(e.clip.path, e.marks);
+}
+
+void AddMark(EditorState& e, double t)
+{
+    for (const Bookmark& b : e.marks)
+        if (std::fabs(b.t - t) < 0.25) return;   // one is already there
+    Bookmark b;
+    b.t = t;
+    b.game = e.clip.game;
+    e.marks.push_back(b);
+    SaveMarks(e);
+    for (size_t i = 0; i < e.marks.size(); ++i)
+        if (e.marks[i].t == t) e.selMark = (int)i;
+}
+
+// Keeps `before` seconds before the mark and `after` after it, as a single section.
+void TrimAroundMark(AppContext& ctx, int i, double dur)
+{
+    EditorState& e = ctx.ui.editor;
+    if (i < 0 || i >= (int)e.marks.size() || dur <= 0.0) return;
+    const double t = e.marks[(size_t)i].t;
+    const double a = std::max(0.0, t - ctx.settings.editor.trimBefore), b = std::min(dur, t + ctx.settings.editor.trimAfter);
+    if (b - a < 0.5) return;
+    PushUndo(e);
+    e.sections = { EditSection{ a, b, 1.0f } };
+    e.selSection = 0;
+    Sync(e);
+    ctx.player.Seek(a);
+}
+
+std::string MarkText(const Bookmark& b)
+{
+    std::string s = FormatDuration(b.t);
+    if (!b.label.empty()) s += "  \xC2\xB7  " + b.label;
+    if (b.source == "auto") s += b.score ? "  \xC2\xB7  highlight " + std::to_string(b.score) : "  \xC2\xB7  highlight";
+    return s;
+}
+
 namespace {
 
 void Video(AppContext& ctx, ImVec2 va, ImVec2 vb, double pos, float hitBottom = -1.0f)
@@ -331,6 +374,58 @@ void Controls(AppContext& ctx, ImVec2 ca, ImVec2 cb, double pos, double dur)
     }
 }
 // Section tools, or the caption editor while a caption is selected.
+// Right-click menu on a pin, and the rename box.
+void MarkMenus(AppContext& ctx, double dur)
+{
+    EditorState& e = ctx.ui.editor;
+    if (BeginMenu("##markmenu")) {
+        if (e.selMark >= 0 && e.selMark < (int)e.marks.size()) {
+            const std::string head = MarkText(e.marks[(size_t)e.selMark]);
+            MenuLabel(head.c_str());
+            if (MenuItem(ICON_RENAME, "Rename\xE2\x80\xA6")) {
+                snprintf(e.markLabel, sizeof(e.markLabel), "%s", e.marks[(size_t)e.selMark].label.c_str());
+                e.openMarkRename = true;
+            }
+            if (MenuItem(ICON_TRIM, "Trim around it")) TrimAroundMark(ctx, e.selMark, dur);
+            MenuSeparator();
+            if (MenuItem(ICON_DELETE, "Delete bookmark", "Del", true)) {
+                e.marks.erase(e.marks.begin() + e.selMark);
+                e.selMark = -1;
+                SaveMarks(e);
+            }
+        }
+        EndMenu();
+    }
+    if (e.openMarkRename) {
+        e.openMarkRename = false;
+        ImGui::OpenPopup("##markrename");
+    }
+    if (BeginModal("##markrename", "Rename bookmark", S(360.0f))) {
+        PushFont(GetFonts().semibold, Type::Title);
+        ImGui::TextUnformatted("Name this moment");
+        PopFont();
+        const float w = ImGui::GetContentRegionAvail().x;
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool enter = TextField("##marklabel", e.markLabel, sizeof(e.markLabel), "e.g. Triple kill", w, ImGuiInputTextFlags_EnterReturnsTrue);
+        ButtonOpts ok;
+        ok.style = Btn::Primary;
+        ok.size = ImVec2(w * 0.5f - S(4.0f), S(38.0f));
+        if (Button("Save##markok", ok) || enter) {
+            if (e.selMark >= 0 && e.selMark < (int)e.marks.size()) {
+                e.marks[(size_t)e.selMark].label = e.markLabel;
+                SaveMarks(e);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        ButtonOpts no;
+        no.style = Btn::Ghost;
+        no.size = ok.size;
+        if (Button("Cancel##markno", no)) ImGui::CloseCurrentPopup();
+        EndModal();
+    }
+}
+
 void LookPopup(AppContext& ctx)
 {
     EditorState& e = ctx.ui.editor;
@@ -436,6 +531,18 @@ void Tools(AppContext& ctx, ImVec2 a, ImVec2 b, double pos, double dur)
         LookPopup(ctx);
     }
     ImGui::SameLine(0, gap);
+    if (Button("##addmark", IconOpts(ICON_BOOKMARK, "Bookmark the playhead (B). [ and ] jump between bookmarks.", S(Tok::ControlHeight)))) AddMark(e, pos);
+    ImGui::SameLine(0, S(4.0f));
+    {
+        ButtonOpts tm;
+        tm.icon = ICON_TRIM;
+        tm.enabled = e.selMark >= 0 && e.selMark < (int)e.marks.size();
+        char tip[96];
+        snprintf(tip, sizeof(tip), "Trim around the selected bookmark: %ds before, %ds after", ctx.settings.editor.trimBefore, ctx.settings.editor.trimAfter);
+        tm.tooltip = tm.enabled ? tip : "Click a bookmark pin first";
+        if (Button("Around mark##trimmark", tm)) TrimAroundMark(ctx, e.selMark, dur);
+    }
+    ImGui::SameLine(0, gap);
     ButtonOpts undo;
     undo.style = Btn::Ghost;
     undo.icon = ICON_UNDO;
@@ -511,6 +618,40 @@ void Timeline(AppContext& ctx, ImVec2 a, ImVec2 b, ImVec2 la, ImVec2 lb, double 
             }
             if (i < e.sections.size()) prev = e.sections[i].end;
         }
+    }
+
+    // Bookmark pins, just above the strip: hover for details, click to jump, right-click for options.
+    // Submitted before the handles and the scrub area so they always get the click.
+    for (size_t i = 0; i < e.marks.size(); ++i) {
+        const Bookmark& bm = e.marks[i];
+        const float px = xOf(bm.t);
+        const bool sel = (int)i == e.selMark;
+        const bool autoMark = bm.source == "auto";
+        const ImU32 col = autoMark ? IM_COL32(255, 176, 60, 255) : Accent2(1.0f);
+        const float ps = S(6.0f), py = a.y - S(9.0f);
+        ImGui::SetCursorScreenPos(ImVec2(px - S(8.0f), py - S(8.0f)));
+        ImGui::PushID((int)(3000 + i));
+        const bool clicked = ImGui::InvisibleButton("##pin", ImVec2(S(16.0f), S(16.0f)), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+        const bool hv = ImGui::IsItemHovered();
+        if (hv) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        const std::string tip = MarkText(bm) + (autoMark ? "" : "\nClick to jump, right-click to rename or delete");
+        Tooltip(tip.c_str());
+        if (clicked) {
+            e.selMark = (int)i;
+            pl.Seek(bm.t);
+        }
+        const bool rightClicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+        ImGui::PopID();
+        if (rightClicked) {   // opened outside the PushID so MarkMenus finds it
+            e.selMark = (int)i;
+            ImGui::OpenPopup("##markmenu");
+        }
+        const float glow = (sel ? 1.0f : 0.0f) + (hv ? 0.5f : 0.0f);
+        if (glow > 0.0f) dl->AddCircleFilled(ImVec2(px, py), ps * 2.0f, ColA(col, 0.22f * std::min(1.0f, glow)), 20);
+        dl->AddLine(ImVec2(px, py + ps), ImVec2(px, b.y), ColA(col, sel ? 0.9f : 0.45f), S(1.2f));
+        const ImVec2 q[4] = { ImVec2(px, py - ps), ImVec2(px + ps, py), ImVec2(px, py + ps), ImVec2(px - ps, py) };
+        dl->AddConvexPolyFilled(q, 4, col);
+        dl->AddPolyline(q, 4, White(sel ? 0.95f : 0.5f), ImDrawFlags_Closed, S(1.0f));
     }
 
     // Sections: outline, speed badge, and handles on both edges.
@@ -714,6 +855,19 @@ engine::ExportRequest BuildExport(AppContext& ctx)
     req.look.volume = e.gain;
     req.look.fadeIn = e.fadeIn;
     req.look.fadeOut = e.fadeOut;
+    // Bookmarks in output time (dropped if they fall in a cut).
+    for (const Bookmark& bm : e.marks) {
+        double out = 0.0;
+        for (const EditSection& sct : e.sections) {
+            if (bm.t >= sct.start && bm.t <= sct.end) {
+                Bookmark o = bm;
+                o.t = out + (bm.t - sct.start) / sct.speed;
+                req.marks.push_back(o);
+                break;
+            }
+            out += (sct.end - sct.start) / sct.speed;
+        }
+    }
     // Audio lanes: re-mix only when something changed (otherwise the tracks are copied as they are).
     const std::vector<ClipAudioLane> lanes = EditorAudio().Lanes();
     if (!lanes.empty() && lanes.size() == e.lanes.size() && (LanesChanged(e) || e.keepTracks)) {
@@ -847,7 +1001,30 @@ void Keyboard(AppContext& ctx, double pos, double dur)
     if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) pl.Seek(std::min(dur, pos + 1.0));
     if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !io.KeyCtrl) Split(e, pos);
     if (ImGui::IsKeyPressed(ImGuiKey_T, false)) AddCaption(e, pos, dur);
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) DeleteSelected(ctx);
+    if (ImGui::IsKeyPressed(ImGuiKey_B, false)) AddMark(e, pos);
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false) || ImGui::IsKeyPressed(ImGuiKey_RightBracket, false)) {
+        const bool next = ImGui::IsKeyPressed(ImGuiKey_RightBracket, false);
+        int best = -1;
+        for (size_t i = 0; i < e.marks.size(); ++i) {
+            const double t = e.marks[i].t;
+            if (next ? t > pos + 0.05 : t < pos - 0.3) {
+                if (best < 0 || (next ? t < e.marks[(size_t)best].t : t > e.marks[(size_t)best].t)) best = (int)i;
+            }
+        }
+        if (best >= 0) {
+            e.selMark = best;
+            pl.Seek(e.marks[(size_t)best].t);
+        }
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {
+        if (e.selMark >= 0 && e.selMark < (int)e.marks.size() && e.selSection < 0 && e.selCaption < 0) {
+            e.marks.erase(e.marks.begin() + e.selMark);
+            e.selMark = -1;
+            SaveMarks(e);
+        } else {
+            DeleteSelected(ctx);
+        }
+    }
     const int k = SectionAt(e, pos);
     if (ImGui::IsKeyPressed(ImGuiKey_I, false) && k >= 0 && e.sections[(size_t)k].end - pos >= kMinSection) {
         PushUndo(e);
@@ -1039,6 +1216,11 @@ void DrawEditor(AppContext& ctx)
     // Audio tracks: load once per clip; while the live mix runs, the player's own audio is muted.
     ClipAudio& au = EditorAudio();
     if (!e.holdPlayer && au.Path() != c.path) au.Load(c.path);
+    if (!e.holdPlayer && e.marksFor != c.path) {
+        e.marks = LoadBookmarks(c.path);
+        e.marksFor = c.path;
+        e.selMark = -1;
+    }
     const std::vector<ClipAudioLane> audioLanes = au.Lanes();
     if (e.lanes.size() != audioLanes.size()) {
         e.lanes.assign(audioLanes.size(), EditLane{});
@@ -1065,11 +1247,11 @@ void DrawEditor(AppContext& ctx)
     const float controlsH = S(46.0f), toolsH = S(48.0f), stripH = S(56.0f), laneH = S(26.0f);
     const float audioH = audioLanes.empty() ? (au.Loading() ? S(22.0f) : 0.0f)
                                             : audioLanes.size() * (S(kAudioLaneH) + S(kAudioLaneGap)) + S(4.0f);
-    const float bottomH = controlsH + toolsH + stripH + laneH + S(26.0f) + audioH;
+    const float bottomH = controlsH + toolsH + stripH + laneH + S(34.0f) + audioH;
     auto bottom = [&](float x0, float x1, float y0) {
         Controls(ctx, ImVec2(x0, y0), ImVec2(x1, y0 + controlsH), pos, dur);
         Tools(ctx, ImVec2(x0, y0 + controlsH), ImVec2(x1, y0 + controlsH + toolsH), pos, dur);
-        const float sy = y0 + controlsH + toolsH + S(10.0f);
+        const float sy = y0 + controlsH + toolsH + S(18.0f);   // room for the bookmark pins above the strip
         Timeline(ctx, ImVec2(x0 + S(12.0f), sy), ImVec2(x1 - S(12.0f), sy + stripH), ImVec2(x0 + S(12.0f), sy + stripH + S(6.0f)),
                  ImVec2(x1 - S(12.0f), sy + stripH + S(6.0f) + laneH), dur, pos);
         TrackLanes(ctx, x0 + S(12.0f), x1 - S(12.0f), sy + stripH + S(6.0f) + laneH + S(8.0f), dur, pos);
@@ -1144,6 +1326,7 @@ void DrawEditor(AppContext& ctx)
     }
 
     ExportPopup(ctx);
+    MarkMenus(ctx, dur);
     Keyboard(ctx, pos, dur);
     ImGui::Dummy(ImVec2(0, 0));
 }

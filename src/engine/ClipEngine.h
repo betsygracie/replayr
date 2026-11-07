@@ -1,5 +1,6 @@
 #pragma once
 #include "core/ClipLibrary.h"
+#include "core/Bookmarks.h"
 #include "media/Banner.h"
 #include "engine/Transcoder.h"
 #include "engine/NoiseSuppression.h"
@@ -127,6 +128,7 @@ struct ExportRequest {
     Look look;
     std::vector<std::vector<float>> mix;   // audio mix matrix (see TranscodeRequest); empty = tracks as they are
     std::vector<int> denoise;              // per source track noise suppression (see TranscodeRequest)
+    std::vector<Bookmark> marks;           // in output time: written as MP4 chapters and the new file's sidecar
 };
 
 class IClipEngine {

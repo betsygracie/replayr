@@ -36,7 +36,7 @@ bool RectOnAnyMonitor(int x, int y, int w, int h);
 void ShowErrorBox(const std::wstring& text);
 bool CommandLineHas(const wchar_t* flag);
 
-enum class Sound { ClipSaved, RecordStart, RecordStop, Screenshot, Error };
+enum class Sound { ClipSaved, RecordStart, RecordStop, Screenshot, Error, Bookmark };
 void PlaySoundCue(Sound s);                              // short synthesized cues, no asset files
 void PlayUiSound(int kind);                              // 0 hover tick, 1 click (very quiet)
 

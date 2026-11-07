@@ -248,6 +248,7 @@ void ClipGrid(AppContext& ctx, const char* id, const std::vector<int>& items, bo
                 d.game = game.c_str();
                 d.when = when.c_str();
                 d.badge = badge;
+                d.bookmarks = c.bookmarks;
                 d.isImage = isImage;
                 d.compact = compact;
                 d.thumb = (ImTextureID)th.texture;

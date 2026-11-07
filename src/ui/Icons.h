@@ -97,6 +97,7 @@
 #define ICON_CALENDAR      "\xEE\x9E\x87"   // U+E787
 #define ICON_SLIDESHOW     "\xEE\x9E\x86"   // U+E786
 #define ICON_SHARE         "\xEE\x9C\xAD"   // U+E72D
+#define ICON_BOOKMARK      "\xEE\xA2\xA4"   // U+E8A4
 #define ICON_PIN           "\xEE\x9C\x98"   // U+E718
 #define ICON_BRIGHTNESS    "\xEE\x9C\x86"   // U+E706
 #define ICON_MULTISELECT   "\xEE\x9D\xA2"   // U+E762

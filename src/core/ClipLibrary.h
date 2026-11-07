@@ -21,6 +21,7 @@ struct ClipInfo {
     bool favourite = false;
     std::vector<std::string> tags;  // the user's own labels
     int64_t lastOpened = 0;        // unix seconds it was last opened in Replayr (0 = never)
+    int bookmarks = 0;             // marks in its sidecar file ("<clip>.replayr.json")
 };
 using ClipList = std::vector<ClipInfo>;
 

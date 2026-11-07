@@ -106,6 +106,7 @@ struct CardData {
     bool thumbLoading = false;
     ImTextureID strip = ImTextureID_Invalid;   // filmstrip: plays as a preview while hovered
     int stripFrames = 0;
+    int bookmarks = 0;                 // bookmark count badge (bottom-left of the thumbnail)
 };
 struct CardResult {
     bool hovered = false;

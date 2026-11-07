@@ -265,6 +265,21 @@ public:
                 ok = Transcode(t, progress, cancel.get(), err);
             }
             if (!ok) message = *cancel ? "Export cancelled." : err;
+            if (ok && !req.marks.empty()) {
+                // Bookmarks go along: as chapters other players can see, and as the new clip's sidecar.
+                std::vector<Chapter> ch;
+                if (req.marks.front().t > 0.5) ch.push_back({ 0.0, "Start" });
+                int n = 0;
+                for (const Bookmark& b : req.marks) {
+                    ++n;
+                    std::string title = b.label;
+                    if (title.empty()) title = b.source == "auto" ? "Highlight" + (b.score ? " (" + std::to_string(b.score) + ")" : std::string()) : "Bookmark " + std::to_string(n);
+                    ch.push_back({ b.t, title });
+                }
+                std::string cerr;
+                if (!WriteMp4Chapters(req.destination, ch, cerr)) Log("Export: chapters not added: %s", cerr.c_str());
+                SaveBookmarks(req.destination, req.marks);
+            }
             if (!ok) platform::DeleteFileNow(req.destination);
             {
                 std::lock_guard<std::mutex> lock(mutex_);

@@ -463,6 +463,7 @@ void PlaySoundCue(Sound which)
     static const std::vector<unsigned char> recStop = SynthTones({ { 987.8f, 0.08f }, { 659.3f, 0.16f } });
     static const std::vector<unsigned char> shot = SynthShutter();
     static const std::vector<unsigned char> err = SynthTones({ { 311.1f, 0.12f }, { 233.1f, 0.2f } });
+    static const std::vector<unsigned char> mark = SynthTones({ { 1318.5f, 0.05f } });   // one short, quiet blip
     const std::vector<unsigned char>* data = &clip;
     switch (which) {
     case Sound::ClipSaved: data = &clip; break;
@@ -470,6 +471,7 @@ void PlaySoundCue(Sound which)
     case Sound::RecordStop: data = &recStop; break;
     case Sound::Screenshot: data = &shot; break;
     case Sound::Error: data = &err; break;
+    case Sound::Bookmark: data = &mark; break;
     }
     PlaySoundW(reinterpret_cast<LPCWSTR>(data->data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
 }

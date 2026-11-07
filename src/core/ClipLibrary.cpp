@@ -1,4 +1,5 @@
 #include "core/ClipLibrary.h"
+#include "core/Bookmarks.h"
 #include "core/Log.h"
 #include "core/Platform.h"
 #include "core/Settings.h"
@@ -394,6 +395,7 @@ void ClipLibrary::Impl::Walk(const std::wstring& dir, const std::wstring& game, 
         c.duration = meta.duration;
         c.width = meta.width;
         c.height = meta.height;
+        if (c.type == ClipType::Video) c.bookmarks = CountBookmarks(c.path);
         out.push_back(std::move(c));
     } while (FindNextFileW(h, &fd) && !quit);
     FindClose(h);
@@ -464,7 +466,10 @@ void ClipLibrary::Impl::ApplyPolicy(const ClipList& list)
     }
     int removed = 0;
     for (auto* v : victims)
-        if (platform::RecycleFile(v->path)) ++removed;
+        if (platform::RecycleFile(v->path)) {
+            ++removed;
+            if (FileExists(SidecarPath(v->path))) platform::RecycleFile(SidecarPath(v->path));
+        }
     if (removed > 0) {
         Log("Storage policy moved %d old clips to the Recycle Bin", removed);
         LibraryOpResult r;
@@ -499,6 +504,7 @@ void ClipLibrary::Impl::RunOps()
                 r.ok = false;
                 r.message = "A file called \"" + ToUtf8(stem) + "\" already exists";
             } else if (platform::RenameFile(op.path, target)) {
+                if (FileExists(SidecarPath(op.path))) platform::RenameFile(SidecarPath(op.path), SidecarPath(target));
                 r.ok = true;
                 r.newPath = target;
                 r.message = "Renamed to \"" + ToUtf8(stem) + "\"";
@@ -516,6 +522,7 @@ void ClipLibrary::Impl::RunOps()
             std::wstring target = UniquePath(JoinPath(op.arg, FileStem(op.path) + FileExtension(op.path)));
             if (LowerPath(ParentDir(op.path)) == LowerPath(op.arg)) continue;   // already there
             if (platform::RenameFile(op.path, target)) {
+                if (FileExists(SidecarPath(op.path))) platform::RenameFile(SidecarPath(op.path), SidecarPath(target));
                 r.ok = true;
                 r.newPath = target;
                 r.message = "Moved \"" + ToUtf8(FileStem(op.path)) + "\"";
@@ -530,6 +537,7 @@ void ClipLibrary::Impl::RunOps()
         }
         case OpKind::Delete:
             if (platform::RecycleFile(op.path)) {
+                if (FileExists(SidecarPath(op.path))) platform::RecycleFile(SidecarPath(op.path));
                 r.ok = true;
                 r.message = "Moved \"" + ToUtf8(FileStem(op.path)) + "\" to the Recycle Bin";
                 std::lock_guard<std::mutex> lock(mutex);

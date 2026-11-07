@@ -125,6 +125,13 @@ CardResult ClipCard(const char* id, const CardData& d, ImVec2 size)
         Badge(dl, ImVec2(ib.x - bs.x - S(8.0f), ib.y - bs.y - S(8.0f)), d.badge, IM_COL32(10, 4, 24, 190), White(1.0f));
     }
 
+    if (d.bookmarks > 0) {   // bookmark count, bottom-left
+        char bm[24];
+        snprintf(bm, sizeof(bm), "%s %d", ICON_BOOKMARK, d.bookmarks);
+        const ImVec2 bs = BadgeSize(bm);
+        Badge(dl, ImVec2(ia.x + S(8.0f), ib.y - bs.y - S(8.0f)), bm, IM_COL32(10, 4, 24, 190), Accent2(1.0f));
+    }
+
     // Glare: a soft highlight on the glass that slides with the cursor.
     if (hov > 0.01f && ImGui::IsMousePosValid()) {
         const ImVec2 m = ImGui::GetIO().MousePos;

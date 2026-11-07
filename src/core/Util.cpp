@@ -260,4 +260,18 @@ bool ContainsNoCase(const std::string& haystack, const std::string& needle)
     return ToLowerAscii(haystack).find(ToLowerAscii(needle)) != std::string::npos;
 }
 
+std::string TimeOfDayText()
+{
+    std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%H:%M", &tm);
+    return buf;
+}
+
 } // namespace cs

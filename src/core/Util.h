@@ -10,6 +10,7 @@ std::wstring ToWide(const std::string& s);
 
 std::wstring AppDataDir();        // %APPDATA%\Replayr (created on demand)
 std::wstring LocalDataDir();      // %LOCALAPPDATA%\Replayr (created on demand)
+std::string TimeOfDayText();      // local time, "21:14"
 std::wstring DefaultClipsDir();   // %USERPROFILE%\Videos\Replayr
 std::wstring ExeDir();
 std::wstring WindowsFontsDir();

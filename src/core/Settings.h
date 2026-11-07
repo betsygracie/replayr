@@ -28,6 +28,7 @@ enum class HotkeyAction : int {
     Screenshot,
     ScreenshotRegion,
     ScreenshotWindow,
+    Bookmark,
     Count
 };
 constexpr int kHotkeyCount = (int)HotkeyAction::Count;
@@ -131,6 +132,8 @@ struct EditorSettings {
     int exportQuality = 0;              // 0 Original, 1 High, 2 Small file
     bool loopSelection = true;
     float volume = 0.8f;
+    int trimBefore = 10;                // "Trim around bookmark": seconds kept before the mark
+    int trimAfter = 5;                  // ...and after it
 };
 
 // The animated "Clipped using Replayr" banner on exported clips (and optionally screenshots).
