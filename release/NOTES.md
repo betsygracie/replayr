@@ -1,1 +1,1 @@
-Fullscreen editor fix; Look edits (9:16 / square crop, filters, volume boost, fades); auto-updates.
+Fixed faint Windows caption buttons showing behind the top bar; scrollbar no longer runs over the page panel's edge.

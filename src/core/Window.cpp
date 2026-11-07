@@ -115,7 +115,7 @@ bool Window::Create(void* hinstance, const wchar_t* title, int x, int y, int w, 
     // WS_OVERLAPPEDWINDOW keeps Aero Snap, the DWM shadow, rounded corners and min/max animations.
     // WM_NCCALCSIZE below removes the standard frame so the whole window is ours to draw.
     DWORD exStyle = WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP;
-    d.hwnd = CreateWindowExW(exStyle, CS_WINDOW_CLASS, title, WS_OVERLAPPEDWINDOW, x, y, w, h, nullptr, nullptr, d.hinst, &d);
+    d.hwnd = CreateWindowExW(exStyle, CS_WINDOW_CLASS, title, WS_OVERLAPPEDWINDOW & ~WS_SYSMENU, x, y, w, h, nullptr, nullptr, d.hinst, &d);
     if (!d.hwnd) {
         Log("CreateWindowEx failed (%lu)", GetLastError());
         return false;

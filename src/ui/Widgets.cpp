@@ -1203,14 +1203,29 @@ void Divider(float alpha)
 namespace {
 struct PanelFrame {
     float rounding, border;
+    bool inset = false;      // scrolling panel: the child is inset so its scrollbar stays inside the glass
+    ImVec2 outerA, outerSize;
 };
 std::vector<PanelFrame> g_panels;
 } // namespace
 
 bool BeginPanel(const char* id, ImVec2 size, float padding, bool scroll, float rounding, float border)
 {
-    g_panels.push_back({ rounding, border });
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(padding), S(padding)));
+    PanelFrame f{ rounding, border };
+    float padY = S(padding);
+    if (scroll && size.y != 0.0f) {
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const float w = size.x > 0.0f ? size.x : avail.x + size.x, h = size.y > 0.0f ? size.y : avail.y + size.y;
+        const float iy = std::max(S(rounding) * 0.6f, S(6.0f)), ix = S(6.0f);
+        f.inset = true;
+        f.outerA = ImGui::GetCursorScreenPos();
+        f.outerSize = ImVec2(w, h);
+        ImGui::SetCursorScreenPos(ImVec2(f.outerA.x, f.outerA.y + iy));
+        size = ImVec2(w - ix, h - iy * 2.0f);
+        padY = std::max(0.0f, padY - iy);
+    }
+    g_panels.push_back(f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(padding), padY));
     ImGuiChildFlags cf = ImGuiChildFlags_AlwaysUseWindowPadding;
     if (size.y == 0.0f) cf |= ImGuiChildFlags_AutoResizeY;
     ImGuiWindowFlags wf = ImGuiWindowFlags_NoBackground;
@@ -1226,6 +1241,10 @@ void EndPanel()
     ImGui::EndChild();
     const PanelFrame f = g_panels.back();
     g_panels.pop_back();
+    if (f.inset) {   // report the full glass rect as the item, so layout and the glass match an unscrolled panel
+        ImGui::SetCursorScreenPos(f.outerA);
+        ImGui::Dummy(f.outerSize);
+    }
     // The child draws after its parent, so painting the glass on the parent now still lands behind it.
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();

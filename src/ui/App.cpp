@@ -569,10 +569,13 @@ void App::Impl::DrawRoot(AppContext& ctx)
     Glass(dl, ca, cb, S(Tok::RadiusPanel), 0.0f, Tok::GlassBorder);
     const float t = (float)(ImGui::GetTime() - ui.pageChangedAt);
     const float e = Animations() ? EaseOutCubic(t / 0.22f) : 1.0f;
-    ImGui::SetCursorPos(ImVec2(colX, cy));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(28.0f), S(24.0f)));
+    // The scrolling area is inset from the glass (top/bottom past the rounded corners, a little from the
+    // right edge) so the scrollbar stays inside the panel instead of running over its border.
+    const float insetY = S(Tok::RadiusPanel) * 0.7f, insetX = S(6.0f);
+    ImGui::SetCursorPos(ImVec2(colX, cy + insetY));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(28.0f), std::max(0.0f, S(24.0f) - insetY)));
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, S(Tok::ScrollbarSize));
-    ImGui::BeginChild("##page", ImVec2(colW, H - cy - m), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
+    ImGui::BeginChild("##page", ImVec2(colW - insetX, H - cy - m - insetY * 2.0f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
     ImGui::PopStyleVar(2);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.0f + e);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(10.0f) * (1.0f - e));
