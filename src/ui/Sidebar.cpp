@@ -7,6 +7,8 @@
 #include "ui/Widgets.h"
 #include "core/Hotkeys.h"
 #include "core/Util.h"
+#include "core/Platform.h"
+#include <cstdio>
 #include "media/MediaCache.h"
 
 #include <algorithm>
@@ -16,10 +18,41 @@
 namespace cs::ui {
 
 namespace {
+#define CS_LOGO_REV L"r1"
 
-// The logo: a gradient ring with a gap and a white dot.
-void Logo(ImDrawList* dl, ImVec2 c, float r)
+// The app badge (the same picture as the .exe icon), unpacked from the exe once to a PNG the image
+// cache can load. Falls back to the drawn ring until it's ready.
+std::wstring LogoPath()
 {
+    static std::wstring path;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        size_t n = 0;
+        const void* data = platform::EmbeddedResource(L"LOGO_PNG", &n);
+        const std::wstring p = LocalDataDir() + L"\\logo-" CS_LOGO_REV L".png";
+        if (data && n) {
+            FILE* f = _wfopen(p.c_str(), L"rb");
+            if (f) fclose(f);
+            else if ((f = _wfopen(p.c_str(), L"wb"))) {
+                fwrite(data, 1, n, f);
+                fclose(f);
+            }
+            path = p;
+        }
+    }
+    return path;
+}
+
+void Logo(AppContext& ctx, ImDrawList* dl, ImVec2 c, float r)
+{
+    const std::wstring path = LogoPath();
+    const ImageInfo img = path.empty() ? ImageInfo{} : ctx.images.Get(path);
+    if (img.texture && !img.failed) {
+        const float h = r * 2.6f;
+        dl->AddImage((ImTextureID)img.texture, ImVec2(c.x - h * 0.5f, c.y - h * 0.5f), ImVec2(c.x + h * 0.5f, c.y + h * 0.5f));
+        return;
+    }
     const int n = 40;
     const float a0 = 0.9f, a1 = 0.9f + 5.3f;
     for (int i = 0; i < n; ++i) {
@@ -227,9 +260,9 @@ void DrawSidebar(AppContext& ctx, float width, float height)
     // Header: logo + name, then a divider (as in the reference).
     const float headerH = S(72.0f);
     if (collapsed) {
-        Logo(dl, ImVec2(a.x + width * 0.5f, a.y + headerH * 0.5f), S(12.0f));
+        Logo(ctx, dl, ImVec2(a.x + width * 0.5f, a.y + headerH * 0.5f), S(12.0f));
     } else {
-        Logo(dl, ImVec2(a.x + S(34.0f), a.y + headerH * 0.5f), S(11.0f));
+        Logo(ctx, dl, ImVec2(a.x + S(34.0f), a.y + headerH * 0.5f), S(11.0f));
         PushFont(GetFonts().semibold, 19.0f);
         dl->AddText(ImVec2(a.x + S(56.0f), a.y + headerH * 0.5f - ImGui::GetFontSize() * 0.55f), Pal().text, "Replayr");
         PopFont();

@@ -78,7 +78,9 @@ bool LoadImageFile(IWICImagingFactory* wic, const std::wstring& path, Bgra& out,
     out.h = (int)h;
     out.px.resize((size_t)w * h * 4);
     if (FAILED(conv->CopyPixels(nullptr, w * 4, (UINT)out.px.size(), out.px.data()))) return false;
-    for (size_t i = 3; i < out.px.size(); i += 4) out.px[i] = 255;   // screenshots are opaque
+    // Screenshots are opaque (captures can carry alpha 0); the app's own badge keeps its transparency.
+    if (path.find(L"\\logo-") == std::wstring::npos)
+        for (size_t i = 3; i < out.px.size(); i += 4) out.px[i] = 255;
     return true;
 }
 

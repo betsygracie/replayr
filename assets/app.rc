@@ -35,3 +35,4 @@ END
 FONT_REGULAR  RCDATA "fonts/Poppins-Regular.ttf"
 FONT_MEDIUM   RCDATA "fonts/Poppins-Medium.ttf"
 FONT_SEMIBOLD RCDATA "fonts/Poppins-SemiBold.ttf"
+LOGO_PNG      RCDATA "logo.png"
