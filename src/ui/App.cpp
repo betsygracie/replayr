@@ -66,6 +66,15 @@ struct App::Impl {
     double lastMarkAt = -10.0, lastSaveAt = 0.0, recStartAt = 0.0, recStopAt = 0.0;
     bool lastMarkSaved = false;
     void OnBookmarkHotkey();
+    // Highlights waiting for their "after" seconds to be recorded before they're saved.
+    struct PendingHighlight {
+        double start, end, saveAt;
+        int score;
+        std::wstring game;
+        bool toLibrary;   // auto-save above the minimum score; otherwise into Suggestions
+    };
+    std::vector<PendingHighlight> pendingHighlights;
+    int highlightToasts = 0;   // library auto-saves in flight (their "Clip saved" toast says Highlight)
     Thumbnailer thumbs;
     Filmstrips strips;
     ImageCache images;
@@ -364,6 +373,19 @@ void App::Impl::Tick()
     if (pendingShot.active && now >= pendingShot.at) {
         pendingShot.active = false;
         DoScreenshot(pendingShot.mode);
+    }
+    for (auto it = pendingHighlights.begin(); it != pendingHighlights.end();) {
+        if (now < it->saveAt) {
+            ++it;
+            continue;
+        }
+        // The clip runs from `before` seconds ahead of the first spike to now (>= `after` past the last).
+        const double from = it->start - settings.highlights.before;
+        const int secs = (int)std::ceil(std::min<double>(now - from, settings.replay.seconds));
+        lastSaveAt = now;
+        if (it->toLibrary) ++highlightToasts;
+        engine->SaveClip(std::max(3, secs), it->game, it->toLibrary ? L"" : SuggestionsDir());
+        it = pendingHighlights.erase(it);
     }
     for (auto it = pendingToasts.begin(); it != pendingToasts.end();) {
         const std::wstring poster = strips.PosterPath(it->path, it->modified);
@@ -666,6 +688,9 @@ engine::CaptureConfig App::Impl::BuildConfig() const
     c.micFx.gateDb = s.audio.gateDb;
     c.micFx.highPass = s.audio.highPass;
     c.keepRawMic = s.audio.keepRawMic;
+    c.highlights.enabled = s.highlights.enabled;
+    c.highlights.sensitivity = s.highlights.sensitivity;
+    c.highlights.sources = s.highlights.sources;
     c.pushToTalk = s.audio.pushToTalk;
     c.pushToTalkKey = s.audio.pushToTalkKey;
     c.outputRoot = s.ClipsFolder();
@@ -1049,6 +1074,14 @@ void App::Impl::OnEngineEvent(const engine::EngineEvent& e)
     EditorState& v = ui.editor;
     switch (e.type) {
     case T::ClipSaved: {
+        // Suggested highlights are saved quietly: they show up in the library's Suggested row.
+        if (!e.path.empty() && _wcsicmp(ParentDir(e.path).c_str(), SuggestionsDir().c_str()) == 0) {
+            const double end = lastSaveAt, start = end - e.seconds;
+            std::vector<Bookmark> inside = marks.Range(start, end + 0.25);
+            if (!inside.empty()) SaveBookmarks(e.path, inside);
+            ui.suggestionsChanged = true;
+            break;
+        }
         Sound(platform::Sound::ClipSaved);
         // Bookmarks inside the clip go into its sidecar file. A saved clip ends when Save was
         // pressed; a recording runs from its start to its stop.
@@ -1059,7 +1092,11 @@ void App::Impl::OnEngineEvent(const engine::EngineEvent& e)
             std::vector<Bookmark> inside = marks.Range(start, end + 0.25);
             if (!inside.empty()) SaveBookmarks(e.path, inside);
         }
-        const std::string title = std::string(e.message == "Recording" ? "Recording saved" : "Clip saved") + " \xC2\xB7 " + FormatDuration(e.seconds);
+        std::string title = std::string(e.message == "Recording" ? "Recording saved" : "Clip saved") + " \xC2\xB7 " + FormatDuration(e.seconds);
+        if (highlightToasts > 0 && e.message != "Recording") {
+            --highlightToasts;
+            title = "Highlight saved \xC2\xB7 " + FormatDuration(e.seconds);
+        }
         const std::string game = e.path.empty() ? std::string() : GameFromPath(e.path);
         if (!e.path.empty()) {
             library.Rescan();
@@ -1075,6 +1112,31 @@ void App::Impl::OnEngineEvent(const engine::EngineEvent& e)
         } else {
             Toast(ToastKind::Success, title, game, ICON_SAVE);
         }
+        break;
+    }
+    case T::Highlight: {
+        // An auto bookmark (pins in the editor), then a clip around it once the "after" part is recorded.
+        const std::string game = ToUtf8(CurrentGame());
+        marks.Add(e.seconds, game, "auto", e.score);
+        if (!settings.highlights.enabled) break;
+        PendingHighlight ph;
+        ph.start = e.seconds;
+        ph.end = e.end;
+        ph.score = e.score;
+        ph.game = CurrentGame();
+        ph.toLibrary = settings.highlights.autoSave && e.score >= settings.highlights.minScore;
+        ph.saveAt = std::max(NowSeconds(), e.end + settings.highlights.after);
+        // A highlight still waiting can absorb this one (same scene): keep the earliest start.
+        bool merged = false;
+        for (PendingHighlight& p : pendingHighlights)
+            if (e.seconds - p.end < settings.highlights.before) {
+                p.end = std::max(p.end, e.end);
+                p.score = std::max(p.score, e.score);
+                p.saveAt = std::max(p.saveAt, ph.saveAt);
+                p.toLibrary = p.toLibrary || ph.toLibrary;
+                merged = true;
+            }
+        if (!merged) pendingHighlights.push_back(ph);
         break;
     }
     case T::RecordingStarted:

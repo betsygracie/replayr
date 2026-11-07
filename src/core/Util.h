@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // Small helpers shared by every layer. No Windows types in this header.
 namespace cs {
@@ -11,6 +12,8 @@ std::wstring ToWide(const std::string& s);
 std::wstring AppDataDir();        // %APPDATA%\Replayr (created on demand)
 std::wstring LocalDataDir();      // %LOCALAPPDATA%\Replayr (created on demand)
 std::string TimeOfDayText();      // local time, "21:14"
+std::wstring SuggestionsDir();
+std::vector<std::wstring> ListFiles(const std::wstring& dir, const wchar_t* pattern);   // full paths, not recursive    // %LOCALAPPDATA%\Replayr\Suggestions (suggested highlight clips)
 std::wstring DefaultClipsDir();   // %USERPROFILE%\Videos\Replayr
 std::wstring ExeDir();
 std::wstring WindowsFontsDir();

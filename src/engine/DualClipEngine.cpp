@@ -65,10 +65,10 @@ public:
         main_->StopBuffer();
         if (second_) second_->StopBuffer();
     }
-    void SaveClip(int seconds, const std::wstring& game) override
+    void SaveClip(int seconds, const std::wstring& game, const std::wstring& folder) override
     {
-        main_->SaveClip(seconds, game);
-        if (second_) second_->SaveClip(seconds, game);
+        main_->SaveClip(seconds, game, folder);
+        if (second_ && folder.empty()) second_->SaveClip(seconds, game, folder);   // suggestions: the game view only
     }
     void StartRecording(const std::wstring& game) override
     {

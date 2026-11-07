@@ -84,6 +84,16 @@ struct AudioSettings {
     bool keepRawMic = false;            // also record the untouched mic, to switch back in the editor
 };
 
+// Auto-highlights: loud moments in the game audio / mic become suggested clips.
+struct HighlightSettings {
+    bool enabled = true;
+    int sensitivity = 1;                // 0 low, 1 medium, 2 high
+    int sources = 2;                    // 0 game audio, 1 mic, 2 both
+    bool autoSave = false;              // save highlights above minScore straight into the library
+    int minScore = 80;
+    int before = 10, after = 5;         // seconds kept around a highlight
+};
+
 struct StorageSettings {
     std::wstring outputFolder;          // empty = Videos\Replayr
     bool perGameFolders = true;
@@ -160,6 +170,7 @@ struct Settings {
     ReplaySettings replay;
     AudioSettings audio;
     StorageSettings storage;
+    HighlightSettings highlights;
     GeneralSettings general;
     EditorSettings editor;
     BannerSettings banner;

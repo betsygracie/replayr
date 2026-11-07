@@ -274,4 +274,19 @@ std::string TimeOfDayText()
     return buf;
 }
 
+std::wstring SuggestionsDir() { return JoinPath(LocalDataDir(), L"Suggestions"); }
+
+std::vector<std::wstring> ListFiles(const std::wstring& dir, const wchar_t* pattern)
+{
+    std::vector<std::wstring> out;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(JoinPath(dir, pattern).c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) out.push_back(JoinPath(dir, fd.cFileName));
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return out;
+}
+
 } // namespace cs

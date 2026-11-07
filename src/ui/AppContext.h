@@ -202,6 +202,7 @@ struct UiState {
     int welcomeStep = 0;
     std::vector<Action> actions;
 
+    bool suggestionsChanged = true;  // the Suggested highlights row rescans its folder
     bool settingsDirty = false, themeDirty = false, hotkeysDirty = false, engineDirty = false, audioDirty = false, storageDirty = false,
          startupDirty = false;
 };

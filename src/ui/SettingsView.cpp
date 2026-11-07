@@ -33,7 +33,7 @@ struct Category {
     const char* name;
 };
 const Category kCategories[] = {
-    { ICON_GENERAL, "General" }, { ICON_RECORDING, "Recording" }, { ICON_AUDIO, "Audio" }, { ICON_KEYBOARD, "Hotkeys" }, { ICON_FOLDER, "Storage" },
+    { ICON_GENERAL, "General" }, { ICON_RECORDING, "Recording" }, { ICON_AUDIO, "Audio" }, { ICON_KEYBOARD, "Hotkeys" }, { ICON_FOLDER, "Storage" }, { ICON_STAR, "Highlights" },
 };
 constexpr int kCategoryCount = (int)(sizeof(kCategories) / sizeof(kCategories[0]));
 
@@ -719,6 +719,59 @@ void Recording(AppContext& ctx)
 
 void MicCleanup(AppContext& ctx);
 
+// Auto-highlights: loud moments become suggested clips (and pins in the editor).
+void HighlightsPage(AppContext& ctx)
+{
+    Settings& s = ctx.settings;
+    HighlightSettings& h = s.highlights;
+    Group("Auto-highlights");
+    if (BeginRows("##hl")) {
+        ToggleRow("Find highlights",
+                  "Listens for sudden loud moments (fights, explosions, you shouting) and suggests clips of them. It all happens on "
+                  "your PC: no audio is stored or sent anywhere.",
+                  &h.enabled, ctx, &AppContext::ChangedEngine);
+        if (h.enabled) {
+            Row("Sensitivity", "High finds more moments (and some false alarms); Low only the big ones. Try a loud shooter and a quiet game.");
+            static const char* sens[] = { "Low", "Medium", "High" };
+            Right(CW());
+            if (Segmented("##hlsens", &h.sensitivity, sens, 3, CW())) ctx.ChangedEngine();
+            RowEnd();
+            Row("Listen to", "Your mic counts only while \"Record microphone\" is on.");
+            static const char* src[] = { "Game audio", "Mic", "Both" };
+            Right(CW());
+            if (Segmented("##hlsrc", &h.sources, src, 3, CW())) ctx.ChangedEngine();
+            RowEnd();
+            Row("Clip around it", "How much is kept before the moment starts and after it ends.");
+            Right(CW());
+            ImGui::BeginGroup();
+            char b[32], a[32];
+            snprintf(b, sizeof(b), "%ds before", h.before);
+            snprintf(a, sizeof(a), "%ds after", h.after);
+            if (SliderInt("##hlbefore", &h.before, 2, 30, b, 1, CW())) ctx.Changed();
+            if (SliderInt("##hlafter", &h.after, 1, 20, a, 1, CW())) ctx.Changed();
+            ImGui::EndGroup();
+            RowEnd();
+        }
+    }
+    EndRows();
+    if (h.enabled) {
+        Group("Saving");
+        if (BeginRows("##hlsave")) {
+            ToggleRow("Auto-save top highlights", "Highlights at or above the score below go straight into your clips. The rest wait in "
+                      "Suggested highlights at the top of Clips for a day.", &h.autoSave, ctx, &AppContext::Changed);
+            if (h.autoSave) {
+                Row("Minimum score", "Scores run 0-100: bigger jumps, longer fights and you reacting at the same time score higher.");
+                char v[16];
+                snprintf(v, sizeof(v), "%d", h.minScore);
+                Right(CW());
+                if (SliderInt("##hlmin", &h.minScore, 30, 100, v, 5, CW())) ctx.Changed();
+                RowEnd();
+            }
+        }
+        EndRows();
+    }
+}
+
 void Audio(AppContext& ctx)
 {
     Settings& s = ctx.settings;
@@ -1033,6 +1086,7 @@ void DrawSettings(AppContext& ctx)
     case 1: Recording(ctx); break;
     case 2: Audio(ctx); break;
     case 3: HotkeysPage(ctx); break;
+    case 5: HighlightsPage(ctx); break;
     default: Storage(ctx); break;
     }
     ImGui::EndChild();

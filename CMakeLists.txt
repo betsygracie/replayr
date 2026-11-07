@@ -100,6 +100,7 @@ set(CS_SOURCES
     src/engine/WindowCapture.cpp
     src/engine/DualClipEngine.cpp
     src/engine/NoiseSuppression.cpp
+    src/engine/HighlightDetector.cpp
     src/engine/MicTest.cpp
     src/engine/MediaWriter.cpp
     src/engine/AudioInput.cpp

@@ -139,11 +139,13 @@ struct Cmd {
     CmdType type;
     int seconds = 0;
     std::wstring game;
+    std::wstring folder;
 };
 
 struct PendingSave {
     int seconds = 0;
     std::wstring game;
+    std::wstring folder;
 };
 
 class RealClipEngine final : public IClipEngine {
@@ -200,7 +202,7 @@ public:
 
     void StartBuffer() override { PushCmd({ CmdType::StartBuffer }); }
     void StopBuffer() override { PushCmd({ CmdType::StopBuffer }); }
-    void SaveClip(int seconds, const std::wstring& game) override { PushCmd({ CmdType::Save, seconds, game }); }
+    void SaveClip(int seconds, const std::wstring& game, const std::wstring& folder) override { PushCmd({ CmdType::Save, seconds, game, folder }); }
     void StartRecording(const std::wstring& game) override
     {
         {
@@ -506,7 +508,7 @@ private:
                     PushError("The replay buffer is still filling up.");
                     break;
                 }
-                pendingSaves_.push_back({ c.seconds, c.game });
+                pendingSaves_.push_back({ c.seconds, c.game, c.folder });
                 forceCut_ = true;
                 break;
             }
@@ -569,6 +571,8 @@ private:
         sysIn_.reset();
         micIn_.reset();
         micFx_.reset();   // fresh processor per session (its 10 ms delay starts at zero)
+        highlights_.Reset();
+        pumped_ = 0;
         tracks_.clear();
         if (ok && scfg_.captureSystem) {
             sysIn_ = std::make_unique<AudioInput>();
@@ -965,6 +969,30 @@ private:
             if (fx.suppress || fx.gate || fx.highPass) micFx_->Process(slot_[1].data(), n);
         }
         for (float& v : slot_[1]) v *= gains[1];
+        // Highlights: game audio and the cleaned mic, on the wall clock.
+        {
+            HighlightConfig hc;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                hc = cfg_.highlights;
+            }
+            highlights_.Configure(hc);
+            if (hc.enabled) {
+                const double t = sessionStart_ + (double)pumped_ / AudioInput::Rate;
+                highlights_.Feed(sysIn_ ? slot_[0].data() : nullptr, micIn_ ? slot_[1].data() : nullptr, n, t);
+                Highlight h;
+                while (highlights_.Poll(h)) {
+                    EngineEvent ev;
+                    ev.type = EngineEventType::Highlight;
+                    ev.seconds = h.start;
+                    ev.end = h.end;
+                    ev.score = h.score;
+                    ev.message = h.game && h.mic ? "both" : (h.mic ? "mic" : "game");
+                    Push(ev);
+                }
+            }
+            pumped_ += n;
+        }
         for (size_t ti = 0; ti < tracks_.size(); ++ti) {
             Track& tr = tracks_[ti];
             mix_.assign((size_t)n * 2, 0.0f);
@@ -1057,7 +1085,13 @@ private:
                 ids.push_back(s.id);
             }
         }
-        const std::wstring out = ClipPath(scfg_, ps.game);
+        std::wstring out;
+        if (!ps.folder.empty()) {
+            EnsureDir(ps.folder);
+            out = UniquePath(JoinPath(ps.folder, SanitizeFileName(ps.game.empty() ? L"Clip" : ps.game) + L" " + TimestampForFile() + L".mp4"));
+        } else {
+            out = ClipPath(scfg_, ps.game);
+        }
         SpawnJoin(ids, out, from, false, cutTime - from);
     }
 
@@ -1221,6 +1255,8 @@ private:
     std::vector<uint8_t> frameBuf_;
     std::vector<float> slot_[3];   // system, mic (cleaned), mic (raw)
     std::unique_ptr<MicProcessor> micFx_;
+    HighlightDetector highlights_;
+    int64_t pumped_ = 0;   // audio frames pumped this session
     std::vector<float> mix_;
     bool session_ = false, wantBuffer_ = false, forceCut_ = false, restartPending_ = false;
     bool recActive_ = false, recStartPending_ = false, recStopPending_ = false, reconfigAfterRec_ = false;

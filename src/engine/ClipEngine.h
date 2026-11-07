@@ -4,6 +4,7 @@
 #include "media/Banner.h"
 #include "engine/Transcoder.h"
 #include "engine/NoiseSuppression.h"
+#include "engine/HighlightDetector.h"
 
 #include <cstdint>
 #include <memory>
@@ -71,6 +72,7 @@ struct CaptureConfig {
     std::wstring fileSuffix;            // added to saved file names ("_game", "_screen" in Both mode)
     MicFx micFx;                        // noise suppression / gate / high-pass on the mic
     bool keepRawMic = false;            // also record the untouched mic as a 4th track ("Mic (raw)")
+    HighlightConfig highlights;         // loud-moment detection on the game audio / mic
 };
 
 struct EngineStatus {
@@ -99,6 +101,7 @@ enum class EngineEventType {
     ExportDone,         // job, path
     ExportFailed,       // job, message
     EncoderProbeDone,
+    Highlight,          // seconds = start, end, score (wall clock, NowSeconds()), message = "game" / "mic" / "both"
     Info,
     Error,
 };
@@ -110,6 +113,8 @@ struct EngineEvent {
     double seconds = 0.0;
     float progress = 0.0f;
     uint64_t job = 0;
+    double end = 0.0;
+    int score = 0;
 };
 
 struct ExportRequest {
@@ -138,7 +143,8 @@ public:
     virtual void Configure(const CaptureConfig& cfg) = 0;
     virtual void StartBuffer() = 0;
     virtual void StopBuffer() = 0;
-    virtual void SaveClip(int seconds, const std::wstring& gameName) = 0;   // seconds <= 0: whole buffer
+    // seconds <= 0: whole buffer. folder: save there instead of the clips folder (suggested highlights).
+    virtual void SaveClip(int seconds, const std::wstring& gameName, const std::wstring& folder = L"") = 0;
     virtual void StartRecording(const std::wstring& gameName) = 0;
     virtual void StopRecording() = 0;
 

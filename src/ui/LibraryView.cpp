@@ -5,6 +5,10 @@
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
 #include "core/Util.h"
+#include "core/Bookmarks.h"
+#include "core/Platform.h"
+#include "core/Thumbnailer.h"
+#include "media/MediaCache.h"
 
 #include <algorithm>
 #include <climits>
@@ -113,6 +117,149 @@ void Filters(AppContext& ctx, bool screenshots, float width)
 
 } // namespace
 
+// ---- Suggested highlights -----------------------------------------------------------------
+// Short clips the highlight detector saved into the Suggestions folder. Save moves one into the
+// library; Dismiss deletes it. Old ones (over a day) and extras (past 12) are cleared out.
+namespace {
+struct Suggestion {
+    std::wstring path;
+    int64_t modified = 0;
+    int score = 0;
+    std::string game, sources;
+};
+std::vector<Suggestion> g_suggestions;
+double g_suggestScan = -100.0;
+
+void ScanSuggestions(AppContext& ctx)
+{
+    const double now = NowSeconds();
+    if (!ctx.ui.suggestionsChanged && now - g_suggestScan < 5.0) return;
+    ctx.ui.suggestionsChanged = false;
+    g_suggestScan = now;
+    std::vector<Suggestion> list;
+    for (const std::wstring& f : ListFiles(SuggestionsDir(), L"*.mp4")) {
+        Suggestion sg;
+        sg.path = f;
+        sg.modified = FileModifiedUnix(f);
+        for (const Bookmark& b : LoadBookmarks(f)) {
+            if (b.source == "auto") sg.score = std::max(sg.score, b.score);
+            if (sg.game.empty()) sg.game = b.game;
+        }
+        list.push_back(sg);
+    }
+    std::sort(list.begin(), list.end(), [](const Suggestion& a, const Suggestion& b) { return a.modified > b.modified; });
+    const int64_t cutoff = (int64_t)std::time(nullptr) - 24 * 3600;
+    for (size_t i = 0; i < list.size();) {
+        if (i >= 12 || list[i].modified < cutoff) {
+            platform::DeleteFileNow(list[i].path);
+            SaveBookmarks(list[i].path, {});
+            list.erase(list.begin() + (ptrdiff_t)i);
+        } else {
+            ++i;
+        }
+    }
+    g_suggestions = std::move(list);
+}
+
+void SuggestedRow(AppContext& ctx, float W)
+{
+    ScanSuggestions(ctx);
+    if (g_suggestions.empty()) return;
+    Settings& st = ctx.settings;
+    // Header: title + count, and the auto-save switch on the right.
+    const ImVec2 hp = ImGui::GetCursorPos();
+    PushFont(GetFonts().semibold, Type::Heading);
+    ImGui::TextUnformatted("Suggested highlights");
+    PopFont();
+    ImGui::SameLine(0, S(10.0f));
+    char cnt[24];
+    snprintf(cnt, sizeof(cnt), "%d new", (int)g_suggestions.size());
+    Badge(ImGui::GetWindowDrawList(), ImVec2(ImGui::GetCursorScreenPos().x, ImGui::GetCursorScreenPos().y + S(4.0f)), cnt, Accent(0.9f), White(1.0f));
+    ImGui::NewLine();
+    {
+        char lbl[48];
+        snprintf(lbl, sizeof(lbl), "Auto-save %d+", st.highlights.minScore);
+        const float tw = ImGui::CalcTextSize(lbl).x;
+        ImGui::SetCursorPos(ImVec2(hp.x + W - S(44.0f) - tw - S(10.0f), hp.y + S(4.0f)));
+        Text(lbl, Pal().textDim, GetFonts().medium, Type::Caption);
+        ImGui::SetCursorPos(ImVec2(hp.x + W - S(44.0f), hp.y));
+        if (Toggle("##autosavehl", &st.highlights.autoSave)) ctx.Changed();
+        Tooltip("Save highlights at or above this score straight into your clips (Settings > Highlights)");
+        ImGui::SetCursorPos(ImVec2(hp.x, hp.y + S(40.0f)));
+    }
+    const float gap = S(14.0f);
+    const int cols = std::max(2, std::min(5, (int)((W + gap) / (S(250.0f) + gap))));
+    const float cardW = std::floor((W - gap * (cols - 1)) / cols);
+    const float cardH = (cardW - S(12.0f)) * 9.0f / 16.0f + S(12.0f) + CardTextHeight();
+    int drop = -1, keep = -1;
+    for (int i = 0; i < (int)g_suggestions.size() && i < cols; ++i) {
+        const Suggestion& sg = g_suggestions[(size_t)i];
+        if (i > 0) ImGui::SameLine(0, gap);
+        ImGui::BeginGroup();
+        const ThumbInfo th = ctx.thumbs.Get(sg.path, sg.modified, (int)(cardW * 1.2f));
+        CardData d;
+        const std::string title = (sg.game.empty() ? std::string("Highlight") : sg.game) + "", when = RelativeTime(sg.modified);
+        char badge[32];
+        snprintf(badge, sizeof(badge), "%s %d", ICON_STAR, sg.score);
+        d.title = title.c_str();
+        d.game = "Suggested highlight";
+        d.when = when.c_str();
+        d.badge = badge;
+        d.thumb = (ImTextureID)th.texture;
+        d.thumbW = th.width;
+        d.thumbH = th.height;
+        d.thumbLoading = !th.texture && !th.failed;
+        const ImVec2 cp = ImGui::GetCursorScreenPos();
+        if (ImGui::IsMouseHoveringRect(cp, ImVec2(cp.x + cardW, cp.y + cardH))) {   // hover plays the moment
+            const StripInfo si = ctx.strips.Get(sg.path, sg.modified);
+            d.strip = (ImTextureID)si.texture;
+            d.stripFrames = si.frames;
+        }
+        char cid[32];
+        snprintf(cid, sizeof(cid), "sg%d", i);
+        const CardResult r = ClipCard(cid, d, ImVec2(cardW, cardH));
+        if (r.clicked || r.edit) {
+            ClipInfo ci;
+            ci.path = sg.path;
+            ci.title = ToUtf8(FileStem(sg.path));
+            ci.game = sg.game;
+            ci.modified = sg.modified;
+            OpenEditor(ctx, ci);
+        }
+        const float bw = (cardW - S(8.0f)) * 0.5f;
+        ButtonOpts sv;
+        sv.style = Btn::Primary;
+        sv.icon = ICON_SAVE;
+        sv.size = ImVec2(bw, S(32.0f));
+        sv.tooltip = "Keep it: moves the clip into your library";
+        ImGui::PushID(i);
+        if (Button("Save clip", sv)) keep = i;
+        ImGui::SameLine(0, S(8.0f));
+        ButtonOpts ds = sv;
+        ds.style = Btn::Ghost;
+        ds.icon = ICON_CLOSE;
+        ds.tooltip = "Not interested: deletes it";
+        if (Button("Dismiss", ds)) drop = i;
+        ImGui::PopID();
+        ImGui::EndGroup();
+    }
+    if (keep >= 0) {
+        const Suggestion sg = g_suggestions[(size_t)keep];
+        std::wstring dest = st.ClipsFolder();
+        if (st.storage.perGameFolders && !sg.game.empty()) dest = JoinPath(dest, SanitizeFileName(ToWide(sg.game)));
+        ctx.library.Move(sg.path, dest);
+        g_suggestions.erase(g_suggestions.begin() + keep);
+        Snack(ctx.ui, "Saved to your clips");
+    }
+    if (drop >= 0) {
+        platform::DeleteFileNow(g_suggestions[(size_t)drop].path);
+        SaveBookmarks(g_suggestions[(size_t)drop].path, {});
+        g_suggestions.erase(g_suggestions.begin() + drop);
+    }
+    Gap(22.0f);
+}
+} // namespace
+
 void DrawLibrary(AppContext& ctx, bool screenshots)
 {
     LibraryState& lib = ctx.ui.library;
@@ -177,6 +324,7 @@ void DrawLibrary(AppContext& ctx, bool screenshots)
     static const char* clipSorts[] = { "Newest", "Oldest", "Longest" };
     if (Dropdown("##sort", &sort, clipSorts, screenshots ? 2 : 3, sw)) ctx.Changed();
     ImGui::SetCursorPos(ImVec2(x0, y0 + S(Tok::ControlHeight) + S(18.0f)));
+    if (!screenshots && q.empty()) SuggestedRow(ctx, W);
 
     if (items.empty()) {
         if (!q.empty()) EmptyState(ctx, "Nothing found", "Try a different word, or clear the search.", false);

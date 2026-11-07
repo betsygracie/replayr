@@ -209,6 +209,21 @@ bool LoadSettings(const std::wstring& path, Settings& s, std::string* error)
         GetW(g, "ffmpegPath", s.general.ffmpegPath);
         Get(g, "trayHintShown", s.general.trayHintShown);
     }
+    if (j.contains("highlights")) {
+        const json& e = j["highlights"];
+        Get(e, "enabled", s.highlights.enabled);
+        Get(e, "sensitivity", s.highlights.sensitivity);
+        Get(e, "sources", s.highlights.sources);
+        Get(e, "autoSave", s.highlights.autoSave);
+        Get(e, "minScore", s.highlights.minScore);
+        Get(e, "before", s.highlights.before);
+        Get(e, "after", s.highlights.after);
+        s.highlights.sensitivity = Clamp(s.highlights.sensitivity, 0, 2);
+        s.highlights.sources = Clamp(s.highlights.sources, 0, 2);
+        s.highlights.minScore = Clamp(s.highlights.minScore, 0, 100);
+        s.highlights.before = Clamp(s.highlights.before, 2, 60);
+        s.highlights.after = Clamp(s.highlights.after, 1, 30);
+    }
     if (j.contains("editor")) {
         const json& e = j["editor"];
         Get(e, "exportQuality", s.editor.exportQuality);
@@ -330,6 +345,10 @@ std::string SerializeSettings(const Settings& s)
         { "glass", s.general.glass }, { "backdrop", s.general.backdrop }, { "designVersion", 3 }, { "animations", s.general.animations }, { "background", s.general.background }, { "uiSounds", s.general.uiSounds }, { "autoUpdate", s.general.autoUpdate }, { "setupDone", s.general.setupDone }, { "accountServer", s.general.accountServer },
         { "uiScale", s.general.uiScale }, { "ffmpegPath", ToUtf8(s.general.ffmpegPath) },
         { "trayHintShown", s.general.trayHintShown },
+    };
+    j["highlights"] = {
+        { "enabled", s.highlights.enabled }, { "sensitivity", s.highlights.sensitivity }, { "sources", s.highlights.sources },
+        { "autoSave", s.highlights.autoSave }, { "minScore", s.highlights.minScore }, { "before", s.highlights.before }, { "after", s.highlights.after },
     };
     j["editor"] = {
         { "exportQuality", s.editor.exportQuality }, { "loopSelection", s.editor.loopSelection }, { "volume", s.editor.volume },
