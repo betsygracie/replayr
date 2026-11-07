@@ -654,6 +654,12 @@ engine::CaptureConfig App::Impl::BuildConfig() const
     c.systemVolume = s.audio.systemMuted ? 0.0f : s.audio.systemVolume;
     c.captureMic = s.audio.captureMic;
     c.micVolume = s.audio.micMuted ? 0.0f : s.audio.micVolume;
+    c.micFx.suppress = s.audio.noiseSuppression;
+    c.micFx.strength = s.audio.suppressionStrength;
+    c.micFx.gate = s.audio.noiseGate;
+    c.micFx.gateDb = s.audio.gateDb;
+    c.micFx.highPass = s.audio.highPass;
+    c.keepRawMic = s.audio.keepRawMic;
     c.pushToTalk = s.audio.pushToTalk;
     c.pushToTalkKey = s.audio.pushToTalkKey;
     c.outputRoot = s.ClipsFolder();

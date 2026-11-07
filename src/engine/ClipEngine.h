@@ -2,6 +2,7 @@
 #include "core/ClipLibrary.h"
 #include "media/Banner.h"
 #include "engine/Transcoder.h"
+#include "engine/NoiseSuppression.h"
 
 #include <cstdint>
 #include <memory>
@@ -67,6 +68,8 @@ struct CaptureConfig {
     std::wstring outputDeviceId;        // "" = default playback device (loopback)
     std::wstring inputDeviceId;         // "" = default microphone
     std::wstring fileSuffix;            // added to saved file names ("_game", "_screen" in Both mode)
+    MicFx micFx;                        // noise suppression / gate / high-pass on the mic
+    bool keepRawMic = false;            // also record the untouched mic as a 4th track ("Mic (raw)")
 };
 
 struct EngineStatus {
@@ -123,6 +126,7 @@ struct ExportRequest {
     bool hardware = true;
     Look look;
     std::vector<std::vector<float>> mix;   // audio mix matrix (see TranscodeRequest); empty = tracks as they are
+    std::vector<int> denoise;              // per source track noise suppression (see TranscodeRequest)
 };
 
 class IClipEngine {

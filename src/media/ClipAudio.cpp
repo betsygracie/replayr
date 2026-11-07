@@ -1,5 +1,6 @@
 #include "media/ClipAudio.h"
 #include "core/Log.h"
+#include "engine/NoiseSuppression.h"
 
 #include <windows.h>
 #include <audioclient.h>
@@ -43,6 +44,10 @@ struct ClipAudio::Impl {
     std::vector<std::vector<float>> pcm;     // per track, interleaved stereo, empty if too long
     std::vector<std::vector<float>> peaks;   // per track
     std::vector<ClipAudioLane> lanes;
+    std::vector<std::vector<float>> clean;   // per track: noise-suppressed copy (empty until made)
+    std::vector<bool> useClean;
+    std::thread cleaner;
+    bool cleanBusy = false;   // guarded by m
 
     // Live mix state (UI thread writes, render thread reads).
     std::vector<float> gains;                // per lane
@@ -56,6 +61,8 @@ struct ClipAudio::Impl {
         quit = true;
         if (loader.joinable()) loader.join();
         if (renderer.joinable()) renderer.join();
+        if (cleaner.joinable()) cleaner.join();
+        cleanBusy = false;
         cancel = false;
         quit = false;
         loading = false;
@@ -81,6 +88,8 @@ void ClipAudio::Load(const std::wstring& path)
         d_->pcm.clear();
         d_->peaks.clear();
         d_->lanes.clear();
+        d_->clean.clear();
+        d_->useClean.clear();
         d_->followPlaying = false;
     }
     if (path.empty()) return;
@@ -179,7 +188,8 @@ void ClipAudio::Impl::LoadThread(std::wstring file)
         if (n >= 3) {
             lanes.push_back({ "Game", 1 });
             lanes.push_back({ "Mic", 2 });
-            for (int i = 3; i < n; ++i) lanes.push_back({ "Track " + std::to_string(i + 1), i });
+            if (n >= 4) lanes.push_back({ "Mic (raw)", 3 });
+            for (int i = 4; i < n; ++i) lanes.push_back({ "Track " + std::to_string(i + 1), i });
         } else if (n == 2) {
             lanes.push_back({ "Game", 0 });
             lanes.push_back({ "Mic", 1 });
@@ -193,6 +203,8 @@ void ClipAudio::Impl::LoadThread(std::wstring file)
         peaks = std::move(peakL);
         this->lanes = std::move(lanes);
         gains.assign(this->lanes.size(), 1.0f);
+        clean.assign((size_t)n, {});
+        useClean.assign((size_t)n, false);
         ready = true;
     }();
     loading = false;
@@ -253,6 +265,46 @@ void ClipAudio::Follow(double position, bool playing, double rate)
 
 bool ClipAudio::Playing() const { return d_->rendering; }
 
+void ClipAudio::SetDenoise(int track, bool on)
+{
+    Impl& m = *d_;
+    if (!m.ready) return;
+    {
+        std::lock_guard<std::mutex> lock(m.m);
+        if (track < 0 || track >= (int)m.useClean.size() || m.pcm[(size_t)track].empty()) return;
+        m.useClean[(size_t)track] = on;
+        if (!on || !m.clean[(size_t)track].empty() || m.cleanBusy) return;   // nothing to do, or a job is running (asked again next frame)
+    }
+    if (m.cleaner.joinable()) m.cleaner.join();   // the previous job has finished
+    std::vector<float> src;
+    {
+        std::lock_guard<std::mutex> lock(m.m);
+        src = m.pcm[(size_t)track];
+        m.cleanBusy = true;
+    }
+    m.cleaner = std::thread([this, track, src = std::move(src)]() mutable {
+        engine::MicProcessor proc;
+        engine::MicFx fx;
+        fx.suppress = true;
+        fx.strength = 1;
+        fx.gate = false;
+        fx.highPass = true;
+        proc.Configure(fx);
+        const int64_t frames = (int64_t)(src.size() / 2);
+        for (int64_t at = 0; at < frames && !d_->cancel; at += 48000)
+            proc.Process(src.data() + at * 2, std::min<int64_t>(48000, frames - at));
+        std::lock_guard<std::mutex> lock(d_->m);
+        if (!d_->cancel && track < (int)d_->clean.size()) d_->clean[(size_t)track] = std::move(src);
+        d_->cleanBusy = false;
+    });
+}
+
+bool ClipAudio::DenoiseReady(int track) const
+{
+    std::lock_guard<std::mutex> lock(d_->m);
+    return track >= 0 && track < (int)d_->clean.size() && !d_->clean[(size_t)track].empty();
+}
+
 void ClipAudio::Impl::RenderThread()
 {
     HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -312,7 +364,8 @@ void ClipAudio::Impl::RenderThread()
                 for (size_t li = 0; li < lanes.size() && li < gains.size(); ++li) {
                     const float gain = gains[li];
                     if (gain <= 0.0f) continue;
-                    const std::vector<float>& p = pcm[(size_t)lanes[li].track];
+                    const int tk = lanes[li].track;
+                    const std::vector<float>& p = useClean[(size_t)tk] && !clean[(size_t)tk].empty() ? clean[(size_t)tk] : pcm[(size_t)tk];
                     const size_t a = (size_t)std::max<int64_t>(0, i0) * 2, b = a + 2;
                     if (i0 < 0 || b + 1 >= p.size()) continue;
                     l += (p[a] * (1.0f - fr) + p[b] * fr) * gain;

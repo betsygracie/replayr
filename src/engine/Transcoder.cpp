@@ -1,4 +1,5 @@
 #include "engine/Transcoder.h"
+#include "engine/NoiseSuppression.h"
 #include "core/Log.h"
 #include "core/Util.h"
 
@@ -10,6 +11,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <memory>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -220,6 +222,17 @@ bool Transcode(const TranscodeRequest& req, const std::function<void(float)>& pr
     int inTracks = 0;
     for (const Segment& sg : req.segments) inTracks = std::max(inTracks, std::min(4, Probe(sg.source).audioTracks));
     const int outTracks = req.mix.empty() ? inTracks : (inTracks > 0 ? std::min(4, (int)req.mix.size()) : 0);
+    // Noise suppression per source track (one processor each, kept across sections).
+    std::vector<std::unique_ptr<MicProcessor>> cleaners((size_t)std::max(0, inTracks));
+    for (int k = 0; k < inTracks; ++k)
+        if (k < (int)req.denoise.size() && req.denoise[(size_t)k] >= 0) {
+            cleaners[(size_t)k] = std::make_unique<MicProcessor>();
+            MicFx fx;
+            fx.strength = std::clamp(req.denoise[(size_t)k], 0, 2);
+            cleaners[(size_t)k]->Configure(fx);
+        }
+    std::vector<float> nsBuf;
+    std::vector<short> nsOut;
     auto gainOf = [&](int o, int k) -> float {
         if (req.mix.empty()) return o == k ? 1.0f : 0.0f;
         return k < (int)req.mix[(size_t)o].size() ? req.mix[(size_t)o][(size_t)k] : 0.0f;
@@ -678,7 +691,16 @@ bool Transcode(const TranscodeRequest& req, const std::function<void(float)>& pr
                     }
                     const int64_t at = (int64_t)std::llround((outBase + startRel / speed) * kRate);
                     const int64_t toWrite = std::min(outCount, segEndSample - at);
-                    if (toWrite > 0) contribute(track, at, outData, toWrite);
+                    if (toWrite > 0 && cleaners[(size_t)track]) {
+                        nsBuf.resize((size_t)(toWrite * kChannels));
+                        for (size_t i = 0; i < nsBuf.size(); ++i) nsBuf[i] = outData[i] / 32768.0f;
+                        cleaners[(size_t)track]->Process(nsBuf.data(), toWrite);
+                        nsOut.resize(nsBuf.size());
+                        for (size_t i = 0; i < nsBuf.size(); ++i) nsOut[i] = (short)std::clamp((int)std::lround(nsBuf[i] * 32767.0f), -32768, 32767);
+                        contribute(track, at, nsOut.data(), toWrite);
+                    } else if (toWrite > 0) {
+                        contribute(track, at, outData, toWrite);
+                    }
                 }
                 buf->Unlock();
                 if (FAILED(wr)) {

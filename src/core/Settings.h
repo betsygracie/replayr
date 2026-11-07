@@ -74,6 +74,13 @@ struct AudioSettings {
     bool pushToTalk = false;
     uint32_t pushToTalkKey = 0x56;      // V
     std::vector<AppTrack> apps;
+    // Mic clean-up (RNNoise noise suppression, noise gate, high-pass), applied while recording.
+    bool noiseSuppression = true;
+    int suppressionStrength = 1;        // 0 low, 1 medium, 2 high
+    bool noiseGate = false;
+    float gateDb = -45.0f;
+    bool highPass = true;
+    bool keepRawMic = false;            // also record the untouched mic, to switch back in the editor
 };
 
 struct StorageSettings {

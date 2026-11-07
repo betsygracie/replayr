@@ -137,6 +137,12 @@ bool LoadSettings(const std::wstring& path, Settings& s, std::string* error)
         Get(a, "systemMuted", s.audio.systemMuted);
         Get(a, "captureMic", s.audio.captureMic);
         Get(a, "micVolume", s.audio.micVolume);
+        Get(a, "noiseSuppression", s.audio.noiseSuppression);
+        Get(a, "suppressionStrength", s.audio.suppressionStrength);
+        Get(a, "noiseGate", s.audio.noiseGate);
+        Get(a, "gateDb", s.audio.gateDb);
+        Get(a, "highPass", s.audio.highPass);
+        Get(a, "keepRawMic", s.audio.keepRawMic);
         Get(a, "micMuted", s.audio.micMuted);
         Get(a, "pushToTalk", s.audio.pushToTalk);
         Get(a, "pushToTalkKey", s.audio.pushToTalkKey);
@@ -263,6 +269,8 @@ bool LoadSettings(const std::wstring& path, Settings& s, std::string* error)
     s.replay.seconds = Clamp(s.replay.seconds, 15, 600);
     s.audio.systemVolume = Clamp(s.audio.systemVolume, 0.0f, 2.0f);
     s.audio.micVolume = Clamp(s.audio.micVolume, 0.0f, 2.0f);
+    s.audio.suppressionStrength = Clamp(s.audio.suppressionStrength, 0, 2);
+    s.audio.gateDb = Clamp(s.audio.gateDb, -80.0f, -10.0f);
     if (s.audio.sampleRate != 44100 && s.audio.sampleRate != 48000) s.audio.sampleRate = 48000;
     s.storage.maxLibraryGB = Clamp(s.storage.maxLibraryGB, 0, 4096);
     s.storage.autoDeleteDays = Clamp(s.storage.autoDeleteDays, 1, 3650);
@@ -296,6 +304,8 @@ std::string SerializeSettings(const Settings& s)
         { "captureSystem", s.audio.captureSystem }, { "systemVolume", s.audio.systemVolume },
         { "systemMuted", s.audio.systemMuted }, { "captureMic", s.audio.captureMic },
         { "micVolume", s.audio.micVolume }, { "micMuted", s.audio.micMuted },
+          { "noiseSuppression", s.audio.noiseSuppression }, { "suppressionStrength", s.audio.suppressionStrength },
+          { "noiseGate", s.audio.noiseGate }, { "gateDb", s.audio.gateDb }, { "highPass", s.audio.highPass }, { "keepRawMic", s.audio.keepRawMic },
         { "pushToTalk", s.audio.pushToTalk }, { "pushToTalkKey", s.audio.pushToTalkKey }, { "apps", apps },
     };
     j["storage"] = {

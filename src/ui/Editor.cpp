@@ -722,6 +722,14 @@ engine::ExportRequest BuildExport(AppContext& ctx)
         std::vector<float> mixRow((size_t)n, 0.0f);
         for (size_t i = 0; i < lanes.size(); ++i) mixRow[(size_t)lanes[i].track] = g[i];
         req.mix.push_back(mixRow);
+        req.denoise.assign((size_t)n, -1);
+        bool anyNs = false;
+        for (size_t i = 0; i < lanes.size(); ++i)
+            if (e.lanes[i].denoise) {
+                req.denoise[(size_t)lanes[i].track] = 1;
+                anyNs = true;
+            }
+        if (!anyNs) req.denoise.clear();
         if (e.keepTracks && lanes.size() > 1)
             for (size_t i = 0; i < lanes.size(); ++i) {
                 std::vector<float> row((size_t)n, 0.0f);
@@ -897,7 +905,7 @@ std::vector<float> LaneGains(const EditorState& e)
 bool LanesChanged(const EditorState& e)
 {
     for (const EditLane& l : e.lanes)
-        if (l.mute || l.solo || std::fabs(l.gain - 1.0f) > 0.001f) return true;
+        if (l.mute != l.defaultMute || l.solo || l.denoise || std::fabs(l.gain - 1.0f) > 0.001f) return true;
     return false;
 }
 
@@ -952,14 +960,16 @@ void TrackLanes(AppContext& ctx, float x0, float x1, float y0, double dur, doubl
         const float bs = S(20.0f);
         PushFont(GetFonts().semibold, Type::Caption);
         const float nw = ImGui::CalcTextSize(lanes[i].name.c_str()).x;
-        const ImVec2 ha(a.x + S(4.0f), a.y + S(4.0f)), hb(ha.x + nw + bs * 2.0f + S(26.0f), b.y - S(4.0f));
+        const bool isMic = lanes[i].name.rfind("Mic", 0) == 0;
+        const ImVec2 ha(a.x + S(4.0f), a.y + S(4.0f)), hb(ha.x + nw + bs * (isMic ? 3.4f : 2.0f) + S(isMic ? 30.0f : 26.0f), b.y - S(4.0f));
         dl->AddRectFilled(ha, hb, IM_COL32(8, 2, 22, 210), S(5.0f));
         dl->AddText(ImVec2(ha.x + S(8.0f), (ha.y + hb.y - ImGui::GetFontSize()) * 0.5f), White(silent ? 0.5f : 0.95f), lanes[i].name.c_str());
         PopFont();
-        auto chip = [&](const char* id, const char* label, bool* v, ImU32 onCol, float x, const char* tip) {
-            const ImVec2 ca(x, (ha.y + hb.y - bs) * 0.5f), cb(ca.x + bs, ca.y + bs);
+        auto chip = [&](const char* id, const char* label, bool* v, ImU32 onCol, float x, const char* tip, float cw = 0.0f) {
+            const float bw = cw > 0.0f ? cw : bs;
+            const ImVec2 ca(x, (ha.y + hb.y - bs) * 0.5f), cb(ca.x + bw, ca.y + bs);
             ImGui::SetCursorScreenPos(ca);
-            if (ImGui::InvisibleButton(id, ImVec2(bs, bs))) *v = !*v;
+            if (ImGui::InvisibleButton(id, ImVec2(bw, bs))) *v = !*v;
             const bool hv = ImGui::IsItemHovered();
             Tooltip(tip);
             dl->AddRectFilled(ca, cb, *v ? onCol : White(hv ? 0.16f : 0.08f), S(4.0f));
@@ -971,6 +981,11 @@ void TrackLanes(AppContext& ctx, float x0, float x1, float y0, double dur, doubl
         const float cx = ha.x + nw + S(16.0f);
         chip("##mute", "M", &L.mute, IM_COL32(220, 60, 90, 230), cx, "Mute this track");
         chip("##solo", "S", &L.solo, IM_COL32(230, 170, 40, 230), cx + bs + S(4.0f), "Solo: hear only this track");
+        if (isMic) {
+            const bool ready = !L.denoise || EditorAudio().DenoiseReady(lanes[i].track);
+            chip("##ns", "NS", &L.denoise, ready ? IM_COL32(60, 190, 140, 230) : IM_COL32(60, 190, 140, 120), cx + (bs + S(4.0f)) * 2.0f,
+                 L.denoise && !ready ? "Cleaning up the mic\xE2\x80\xA6" : "Noise suppression: removes background noise from this track", bs * 1.4f);
+        }
         // Volume on the right.
         const float sw = S(130.0f), tw = S(40.0f);
         char vt[16];
@@ -1025,7 +1040,12 @@ void DrawEditor(AppContext& ctx)
     ClipAudio& au = EditorAudio();
     if (!e.holdPlayer && au.Path() != c.path) au.Load(c.path);
     const std::vector<ClipAudioLane> audioLanes = au.Lanes();
-    if (e.lanes.size() != audioLanes.size()) e.lanes.assign(audioLanes.size(), EditLane{});
+    if (e.lanes.size() != audioLanes.size()) {
+        e.lanes.assign(audioLanes.size(), EditLane{});
+        for (size_t i = 0; i < audioLanes.size(); ++i)
+            if (audioLanes[i].name == "Mic (raw)") e.lanes[i].mute = e.lanes[i].defaultMute = true;
+    }
+    for (size_t i = 0; i < audioLanes.size(); ++i) au.SetDenoise(audioLanes[i].track, e.lanes[i].denoise);
     au.SetGains(LaneGains(e), std::min(2.0f, s.editor.volume * e.gain));
     au.Follow(pos, pl.IsPlaying(), pl.Rate());
     {

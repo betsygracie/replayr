@@ -14,6 +14,7 @@
 #include "engine/AudioInput.h"
 #include "engine/ClipEngine.h"
 #include "engine/DesktopCapture.h"
+#include "engine/NoiseSuppression.h"
 #include "engine/Encoder.h"
 #include "engine/FFmpegTools.h"
 #include "engine/MediaWriter.h"
@@ -242,7 +243,7 @@ public:
             std::vector<engine::Segment> segs = req.segments;
             if (segs.empty()) segs.push_back(engine::Segment{ req.source, req.start, req.end, 1.0 });
             const bool simple = segs.size() == 1 && segs[0].speed == 1.0 && req.captions.empty() && req.targetMB <= 0.0 && req.quality == 0 &&
-                                !req.banner && !req.look.Any() && req.mix.empty();
+                                !req.banner && !req.look.Any() && req.mix.empty() && req.denoise.empty();
             const double key = !simple ? -1.0 : segs[0].start < 0.05 ? 0.0 : KeyframeAtOrBefore(segs[0].source, segs[0].start);
             const bool copy = simple && key >= 0.0 && segs[0].start - key < 0.06;
             std::string err;
@@ -260,6 +261,7 @@ public:
                 t.hardware = req.hardware;
                 t.look = req.look;
                 t.mix = req.mix;
+                t.denoise = req.denoise;
                 ok = Transcode(t, progress, cancel.get(), err);
             }
             if (!ok) message = *cancel ? "Export cancelled." : err;
@@ -350,7 +352,7 @@ private:
         return a.source != b.source || a.outputHeight != b.outputHeight || a.fps != b.fps || a.bitrateKbps != b.bitrateKbps ||
                a.encoder != b.encoder || a.codec != b.codec || a.captureCursor != b.captureCursor || a.separateTracks != b.separateTracks ||
                a.captureSystem != b.captureSystem || a.captureMic != b.captureMic || a.outputDeviceId != b.outputDeviceId ||
-               a.inputDeviceId != b.inputDeviceId || a.hideCaptureBorder != b.hideCaptureBorder;
+               a.inputDeviceId != b.inputDeviceId || a.hideCaptureBorder != b.hideCaptureBorder || a.keepRawMic != b.keepRawMic;
     }
 
     static std::string FirstLine(const std::string& s)
@@ -551,6 +553,7 @@ private:
         // Audio tracks: system (with the mic mixed in unless tracks are separate) and/or mic.
         sysIn_.reset();
         micIn_.reset();
+        micFx_.reset();   // fresh processor per session (its 10 ms delay starts at zero)
         tracks_.clear();
         if (ok && scfg_.captureSystem) {
             sysIn_ = std::make_unique<AudioInput>();
@@ -575,7 +578,7 @@ private:
         //   otherwise:            1 track with whatever is recorded
         auto track = [&](std::initializer_list<int> slots) {
             Track t;
-            for (int sl : slots) t.inputs.push_back({ sl == 0 ? sysIn_.get() : micIn_.get(), sl });
+            for (int sl : slots) t.inputs.push_back({ sl == 0 ? sysIn_.get() : micIn_.get(), sl });   // slot 2: raw mic
             tracks_.push_back(t);
         };
         if (sysIn_ && micIn_) {
@@ -583,6 +586,7 @@ private:
             if (scfg_.separateTracks) {
                 track({ 0 });
                 track({ 1 });
+                if (scfg_.keepRawMic) track({ 2 });   // the mic before clean-up
             }
         } else if (sysIn_) {
             track({ 0 });
@@ -917,11 +921,13 @@ private:
         if (sysIn_) sysIn_->Poll(expected);
         if (micIn_) micIn_->Poll(expected);
         float gains[2];
+        MicFx fx;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             gains[0] = cfg_.captureSystem ? cfg_.systemVolume : 0.0f;
             gains[1] = cfg_.captureMic ? cfg_.micVolume : 0.0f;
             if (cfg_.pushToTalk && cfg_.pushToTalkKey && !platform::IsKeyDown(cfg_.pushToTalkKey)) gains[1] = 0.0f;
+            fx = cfg_.micFx;
         }
         // Each device is read once per call, then every track is mixed from those buffers (a device
         // can feed several tracks: the Mixed track and its own).
@@ -933,8 +939,17 @@ private:
         AudioInput* dev[2] = { sysIn_.get(), micIn_.get() };
         for (int sl = 0; sl < 2; ++sl) {
             slot_[sl].assign((size_t)n * 2, 0.0f);
-            if (dev[sl]) dev[sl]->Take(slot_[sl].data(), n, gains[sl], false);
+            if (dev[sl]) dev[sl]->Take(slot_[sl].data(), n, sl == 1 ? 1.0f : gains[sl], false);
         }
+        // Mic: keep the raw copy (4th track), then clean it up, then apply the volume / push-to-talk.
+        slot_[2] = slot_[1];
+        for (float& v : slot_[2]) v *= gains[1];
+        if (micIn_) {
+            if (!micFx_) micFx_ = std::make_unique<MicProcessor>();
+            micFx_->Configure(fx);
+            if (fx.suppress || fx.gate || fx.highPass) micFx_->Process(slot_[1].data(), n);
+        }
+        for (float& v : slot_[1]) v *= gains[1];
         for (size_t ti = 0; ti < tracks_.size(); ++ti) {
             Track& tr = tracks_[ti];
             mix_.assign((size_t)n * 2, 0.0f);
@@ -1189,7 +1204,8 @@ private:
     std::unique_ptr<MediaWriter> writer_, prev_;
     std::wstring curPath_;
     std::vector<uint8_t> frameBuf_;
-    std::vector<float> slot_[2];
+    std::vector<float> slot_[3];   // system, mic (cleaned), mic (raw)
+    std::unique_ptr<MicProcessor> micFx_;
     std::vector<float> mix_;
     bool session_ = false, wantBuffer_ = false, forceCut_ = false, restartPending_ = false;
     bool recActive_ = false, recStartPending_ = false, recStopPending_ = false, reconfigAfterRec_ = false;

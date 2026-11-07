@@ -1,1 +1,1 @@
-Separate audio tracks: new recordings have Mixed + Game + Mic tracks. Editor shows Game and Mic as waveform lanes with mute, solo and 0-200% volume, heard live in the preview and applied on export. Option to keep separate tracks in the export.
+Mic clean-up: RNNoise noise suppression (Low/Medium/High), noise gate with a live threshold meter, low-rumble filter, optional raw mic backup track, and a 5-second Test mic. Editor: NS button on mic lanes cleans up existing clips (preview + export).

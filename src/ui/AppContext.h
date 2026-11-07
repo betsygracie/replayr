@@ -96,6 +96,8 @@ struct EditCaption {
 struct EditLane {
     float gain = 1.0f;               // 0 .. 2
     bool mute = false, solo = false;
+    bool defaultMute = false;        // "Mic (raw)" starts muted
+    bool denoise = false;            // mic lanes: noise suppression applied in the editor / export
 };
 
 struct EditorState {

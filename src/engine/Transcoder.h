@@ -49,6 +49,8 @@ struct TranscodeRequest {
     // Audio mix: mix[o][k] is the gain from the source's k-th audio track into output track o.
     // Empty = each source track goes to the same output track unchanged (up to 4).
     std::vector<std::vector<float>> mix;
+    // Per source track: -1 none, else noise suppression strength (0 low .. 2 high) applied before mixing.
+    std::vector<int> denoise;
 };
 
 // Length of the output in seconds.

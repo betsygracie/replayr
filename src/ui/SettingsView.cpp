@@ -1,6 +1,7 @@
 // Settings: five categories on the left, rows on the right (title + short description on the left
 // of each row, the control on the right). Technical options sit in a collapsed "Advanced" section.
 #include "ui/AppContext.h"
+#include "engine/MicTest.h"
 #include "ui/Anim.h"
 #include "ui/Icons.h"
 #include "ui/Theme.h"
@@ -420,6 +421,9 @@ void General(AppContext& ctx)
     }
     TextWrapped(CS_APP_NAME " " CS_APP_VERSION "  \xC2\xB7  clips and screenshots for Windows", Pal().textFaint, ImGui::GetContentRegionAvail().x,
                 GetFonts().regular, Type::Caption);
+    TextWrapped("Mic noise suppression uses RNNoise, (c) 2017 Mozilla, Jean-Marc Valin, Xiph.Org Foundation and Mark Borgerding, "
+                "under the BSD 3-clause licence (included with Replayr's source in third_party/rnnoise/COPYING).",
+                Pal().textFaint, ImGui::GetContentRegionAvail().x, GetFonts().regular, Type::Caption);
 }
 
 int RecommendedMbps(const AppContext& ctx)
@@ -713,6 +717,8 @@ void Recording(AppContext& ctx)
     }
 }
 
+void MicCleanup(AppContext& ctx);
+
 void Audio(AppContext& ctx)
 {
     Settings& s = ctx.settings;
@@ -768,6 +774,8 @@ void Audio(AppContext& ctx)
     }
     EndRows();
 
+    if (s.audio.captureMic) MicCleanup(ctx);
+
     if (Advanced(ctx, 2)) {
         if (BeginRows("##audadv")) {
             ToggleRow("Separate tracks", "Puts your mic on its own audio track so you can mix it later. Off: mixed into one track.",
@@ -775,6 +783,86 @@ void Audio(AppContext& ctx)
         }
         EndRows();
     }
+}
+
+// Mic clean-up: RNNoise noise suppression, noise gate (with its threshold on a live meter),
+// high-pass, raw backup track, and a 5-second before/after test.
+void MicCleanup(AppContext& ctx)
+{
+    Settings& s = ctx.settings;
+    static engine::MicTest test;
+    Group("Mic clean-up");
+    if (BeginRows("##micfx")) {
+        ToggleRow("Noise suppression", "Removes keyboard clatter, fans and background hum from your voice, live while you record. Runs on your PC.",
+                  &s.audio.noiseSuppression, ctx, &AppContext::ChangedEngine);
+        if (s.audio.noiseSuppression) {
+            Row("Strength", "Low keeps a little of the room sound; High removes everything that isn't your voice.");
+            static const char* str[] = { "Low", "Medium", "High" };
+            Right(CW());
+            if (Segmented("##nsstr", &s.audio.suppressionStrength, str, 3, CW())) ctx.ChangedEngine();
+            RowEnd();
+        }
+        ToggleRow("Noise gate", "Silences the mic completely while you aren't talking.", &s.audio.noiseGate, ctx, &AppContext::ChangedEngine);
+        if (s.audio.noiseGate) {
+            Row("Gate opens above", "Talk normally: the meter should go past the white line, and stay under it while you're quiet.");
+            char v[24];
+            snprintf(v, sizeof(v), "%.0f dB", s.audio.gateDb);
+            Right(CW());
+            ImGui::BeginGroup();
+            if (Slider("##gatedb", &s.audio.gateDb, -70.0f, -20.0f, v, CW(), 1.0f)) ctx.ChangedEngine();
+            const ImVec2 mp = ImGui::GetCursorScreenPos();
+            LevelMeter("##gatemeter", ctx.levels.mic * s.audio.micVolume, ImVec2(CW(), S(6.0f)), ctx.levels.micGated);
+            const float x = mp.x + CW() * std::clamp((s.audio.gateDb + 60.0f) / 60.0f, 0.0f, 1.0f);   // meter: -60..0 dB
+            ImGui::GetWindowDrawList()->AddLine(ImVec2(x, mp.y - S(3.0f)), ImVec2(x, mp.y + S(9.0f)), White(0.95f), S(2.0f));
+            ImGui::EndGroup();
+            RowEnd();
+        }
+        ToggleRow("Cut low rumble", "Filters out sound below 80 Hz: desk bumps, fans, traffic. Voices aren't affected.", &s.audio.highPass, ctx,
+                  &AppContext::ChangedEngine);
+        ToggleRow("Also keep the raw mic", "Records your mic a second time without clean-up, so you can switch back in the editor if it sounds wrong.",
+                  &s.audio.keepRawMic, ctx, &AppContext::ChangedEngine);
+
+        // Test: 5 s recording, played back as recorded, then cleaned.
+        const engine::MicTestState ts = test.State();
+        const bool busy = ts == engine::MicTestState::Recording || ts == engine::MicTestState::PlayingRaw || ts == engine::MicTestState::PlayingClean;
+        const char* desc = "Records 5 seconds, then plays it back as recorded and then cleaned up.";
+        std::string status;
+        switch (ts) {
+        case engine::MicTestState::Recording: status = "Recording\xE2\x80\xA6 say something, or tap your desk"; break;
+        case engine::MicTestState::PlayingRaw: status = "Playing: as recorded"; break;
+        case engine::MicTestState::PlayingClean: status = "Playing: cleaned up"; break;
+        case engine::MicTestState::Done: status = "Done. Hear a difference? Try another strength."; break;
+        case engine::MicTestState::Failed: status = test.Error(); break;
+        default: break;
+        }
+        Row("Test mic", status.empty() ? desc : status.c_str());
+        Right(CW());
+        ImGui::BeginGroup();
+        ButtonOpts o;
+        o.style = busy ? Btn::Secondary : Btn::Primary;
+        o.icon = busy ? ICON_STOP : ICON_MIC;
+        o.size = ImVec2(CW(), S(Tok::ControlHeight));
+        if (Button(busy ? "Stop test##mictest" : "Test mic##mictest", o)) {
+            if (busy) test.Stop();
+            else {
+                engine::MicFx fx;
+                fx.suppress = s.audio.noiseSuppression;
+                fx.strength = s.audio.suppressionStrength;
+                fx.gate = s.audio.noiseGate;
+                fx.gateDb = s.audio.gateDb;
+                fx.highPass = s.audio.highPass;
+                test.Start(s.audio.inputDeviceId, fx);
+            }
+        }
+        if (busy) {
+            const ImVec2 pp = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(CW(), S(8.0f)));
+            ProgressBar(ImGui::GetWindowDrawList(), ImVec2(pp.x, pp.y + S(4.0f)), ImVec2(pp.x + CW(), pp.y + S(8.0f)), test.Progress());
+        }
+        ImGui::EndGroup();
+        RowEnd();
+    }
+    EndRows();
 }
 
 const char* HotkeyHelp(HotkeyAction a)

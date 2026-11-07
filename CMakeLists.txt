@@ -98,6 +98,8 @@ set(CS_SOURCES
     src/engine/DesktopCapture.cpp
     src/engine/WindowCapture.cpp
     src/engine/DualClipEngine.cpp
+    src/engine/NoiseSuppression.cpp
+    src/engine/MicTest.cpp
     src/engine/MediaWriter.cpp
     src/engine/AudioInput.cpp
     src/engine/Encoder.cpp
@@ -128,7 +130,7 @@ add_executable(Replayr WIN32 ${CS_SOURCES} assets/app.rc assets/Replayr.manifest
 target_include_directories(Replayr PRIVATE src ${CS_JSON_INCLUDE})
 target_compile_definitions(Replayr PRIVATE
     WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00 _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(Replayr PRIVATE imgui
+target_link_libraries(Replayr PRIVATE imgui rnnoise
     d3d11 dxgi dcomp dwmapi d3dcompiler winhttp ws2_32 bcrypt msimg32
     mfplat mfreadwrite mfuuid
     ole32 oleaut32 uuid shell32 shlwapi propsys windowscodecs
@@ -150,3 +152,13 @@ add_custom_command(TARGET Replayr POST_BUILD
             "${CMAKE_SOURCE_DIR}/assets/fonts" "$<TARGET_FILE_DIR:Replayr>/assets/fonts")
 
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Replayr)
+
+# RNNoise (BSD 3-clause, xiph.org): mic noise suppression. v0.1.1, with the model built in.
+enable_language(C)
+add_library(rnnoise STATIC
+    third_party/rnnoise/src/denoise.c third_party/rnnoise/src/rnn.c third_party/rnnoise/src/rnn_data.c
+    third_party/rnnoise/src/celt_lpc.c third_party/rnnoise/src/kiss_fft.c third_party/rnnoise/src/pitch.c)
+target_include_directories(rnnoise PUBLIC third_party/rnnoise/include PRIVATE third_party/rnnoise/src)
+if(MSVC)
+    target_compile_options(rnnoise PRIVATE /W0 /D_USE_MATH_DEFINES)
+endif()

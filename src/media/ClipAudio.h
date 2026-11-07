@@ -48,6 +48,10 @@ public:
     void Follow(double position, bool playing, double rate);
     bool Playing() const;          // the live mix is running (the video player should be muted)
 
+    // Noise suppression on one track for the preview (computed in the background the first time).
+    void SetDenoise(int track, bool on);
+    bool DenoiseReady(int track) const;
+
     struct Impl;
 
 private:
