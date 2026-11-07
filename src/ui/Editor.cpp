@@ -509,6 +509,76 @@ void Timeline(AppContext& ctx, ImVec2 a, ImVec2 b, ImVec2 la, ImVec2 lb, double 
         }
     }
 
+    // Sections: outline, speed badge, and handles on both edges.
+    const float hw = S(11.0f), hh = b.y - a.y + S(8.0f);
+    for (size_t i = 0; i < e.sections.size(); ++i) {
+        EditSection& s = e.sections[i];
+        const float x0 = xOf(s.start), x1 = xOf(s.end);
+        const bool sel = (int)i == e.selSection;
+        const float sv = Anim(AnimId(ImGui::GetID("##secsel"), (unsigned)i), sel ? 1.0f : 0.0f, Motion::Hover);
+        if (sv > 0.01f) {
+            dl->AddRectFilled(ImVec2(x0, a.y), ImVec2(x1, b.y), Accent2(0.10f * sv), S(4.0f));
+            for (int g = 1; g <= 3; ++g)
+                dl->AddRect(ImVec2(x0 - g * S(1.5f), a.y - g * S(1.5f)), ImVec2(x1 + g * S(1.5f), b.y + g * S(1.5f)), Accent2(0.16f * sv / g), S(5.0f), 0, S(1.5f));
+        }
+        dl->AddRect(ImVec2(x0, a.y), ImVec2(x1, b.y), Mix(Accent(0.9f), White(1.0f), 0.4f * sv), S(4.0f), 0, S(2.0f) + S(1.0f) * sv);
+        if (std::fabs(s.speed - 1.0f) > 0.01f && x1 - x0 > S(36.0f)) {
+            char sp[16];
+            snprintf(sp, sizeof(sp), "%g\xC3\x97", s.speed);
+            const ImVec2 bs = BadgeSize(sp);
+            Badge(dl, ImVec2(x0 + S(6.0f), a.y + S(5.0f)), sp, s.speed < 1.0f ? IM_COL32(40, 120, 255, 220) : IM_COL32(255, 120, 40, 220), White(1.0f));
+            (void)bs;
+        }
+        for (int k = 0; k < 2; ++k) {
+            const float hx = k == 0 ? x0 : x1;
+            const ImVec2 ha(k == 0 ? hx - hw : hx, a.y - S(4.0f)), hb(ha.x + hw, ha.y + hh);
+            // Hit area: wider than the drawn handle, mostly outward so the two handles of a short section don't fight.
+            const float grabOut = S(10.0f), grabIn = S(4.0f);
+            const float gx0 = k == 0 ? ha.x - grabOut : ha.x - grabIn, gx1 = k == 0 ? hb.x + grabIn : hb.x + grabOut;
+            ImGui::SetCursorScreenPos(ImVec2(gx0, ha.y - S(4.0f)));
+            ImGui::PushID((int)(i * 2 + k));
+            ImGui::InvisibleButton("##edge", ImVec2(gx1 - gx0, hh + S(8.0f)));
+            const ImGuiID hid = ImGui::GetItemID();
+            const bool active = ImGui::IsItemActive(), hv = ImGui::IsItemHovered() || active;
+            if (hv) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            Tooltip(k == 0 ? "Drag to trim the start" : "Drag to trim the end");
+            if (ImGui::IsItemActivated()) {
+                PushUndo(e);
+                e.wasPlaying = pl.IsPlaying();
+                pl.Pause();
+                e.dragging = k;
+                e.dragIndex = (int)i;
+                e.dragGrab = ImGui::GetIO().MousePos.x - hx;   // keep the grab offset: no jump on click
+                e.selSection = (int)i;
+                e.selCaption = -1;
+            }
+            if (active) {
+                // Can't cross the neighbours or get shorter than half a second.
+                const double lo = i > 0 ? e.sections[i - 1].end : 0.0, hi = i + 1 < e.sections.size() ? e.sections[i + 1].start : dur;
+                // No playhead snap here: the playhead follows the handle, so snapping to it made the handle stick.
+                const double t = tOf(ImGui::GetIO().MousePos.x - e.dragGrab);
+                if (k == 0) s.start = Clamp(t, lo, std::max(lo, s.end - kMinSection));
+                else s.end = Clamp(t, std::min(hi, s.start + kMinSection), hi);
+                pl.Seek(k == 0 ? s.start : s.end, true);
+                Sync(e);
+            }
+            if (ImGui::IsItemDeactivated()) {
+                pl.Seek(k == 0 ? s.start : std::max(s.start, s.end - 0.05), false);
+                if (e.wasPlaying) pl.Play();
+                e.dragging = -1;
+            }
+            const float hvA = AnimHover(hid, hv);
+            ImGui::PopID();
+            const ImDrawFlags f = k == 0 ? ImDrawFlags_RoundCornersLeft : ImDrawFlags_RoundCornersRight;
+            if (hvA > 0.01f) dl->AddRectFilled(ImVec2(ha.x - S(3.0f), ha.y - S(3.0f)), ImVec2(hb.x + S(3.0f), hb.y + S(3.0f)), Accent2(0.25f * hvA), S(8.0f), f);
+            GradientRect(dl, ha, hb, Mix(Accent(), White(1.0f), 0.2f * hvA), Accent2(), S(6.0f), f);
+            const float gx = ha.x + hw * 0.5f;
+            for (int g = -1; g <= 1; g += 2)
+                dl->AddLine(ImVec2(gx + g * S(1.4f), ha.y + hh * 0.36f), ImVec2(gx + g * S(1.4f), hb.y - hh * 0.36f), White(0.85f), S(1.1f));
+        }
+    }
+
+    // Registered after the handles so they get the mouse first (overlapping items: the first one wins).
     // Scrub surface: click selects the section under the mouse and seeks; drag scrubs.
     ImGui::SetCursorScreenPos(a);
     ImGui::InvisibleButton("##scrub", ImVec2(w, b.y - a.y));
@@ -533,70 +603,6 @@ void Timeline(AppContext& ctx, ImVec2 a, ImVec2 b, ImVec2 la, ImVec2 lb, double 
         pl.Seek(t, false);
         if (e.wasPlaying) pl.Play();
         e.dragging = -1;
-    }
-
-    // Sections: outline, speed badge, and handles on both edges.
-    const float hw = S(11.0f), hh = b.y - a.y + S(8.0f);
-    for (size_t i = 0; i < e.sections.size(); ++i) {
-        EditSection& s = e.sections[i];
-        const float x0 = xOf(s.start), x1 = xOf(s.end);
-        const bool sel = (int)i == e.selSection;
-        const float sv = Anim(AnimId(ImGui::GetID("##secsel"), (unsigned)i), sel ? 1.0f : 0.0f, Motion::Hover);
-        if (sv > 0.01f) {
-            dl->AddRectFilled(ImVec2(x0, a.y), ImVec2(x1, b.y), Accent2(0.10f * sv), S(4.0f));
-            for (int g = 1; g <= 3; ++g)
-                dl->AddRect(ImVec2(x0 - g * S(1.5f), a.y - g * S(1.5f)), ImVec2(x1 + g * S(1.5f), b.y + g * S(1.5f)), Accent2(0.16f * sv / g), S(5.0f), 0, S(1.5f));
-        }
-        dl->AddRect(ImVec2(x0, a.y), ImVec2(x1, b.y), Mix(Accent(0.9f), White(1.0f), 0.4f * sv), S(4.0f), 0, S(2.0f) + S(1.0f) * sv);
-        if (std::fabs(s.speed - 1.0f) > 0.01f && x1 - x0 > S(36.0f)) {
-            char sp[16];
-            snprintf(sp, sizeof(sp), "%g\xC3\x97", s.speed);
-            const ImVec2 bs = BadgeSize(sp);
-            Badge(dl, ImVec2(x0 + S(6.0f), a.y + S(5.0f)), sp, s.speed < 1.0f ? IM_COL32(40, 120, 255, 220) : IM_COL32(255, 120, 40, 220), White(1.0f));
-            (void)bs;
-        }
-        for (int k = 0; k < 2; ++k) {
-            const float hx = k == 0 ? x0 : x1;
-            const ImVec2 ha(k == 0 ? hx - hw : hx, a.y - S(4.0f)), hb(ha.x + hw, ha.y + hh);
-            ImGui::SetCursorScreenPos(ImVec2(ha.x - S(3.0f), ha.y));
-            ImGui::PushID((int)(i * 2 + k));
-            ImGui::InvisibleButton("##edge", ImVec2(hw + S(6.0f), hh));
-            const ImGuiID hid = ImGui::GetItemID();
-            const bool active = ImGui::IsItemActive(), hv = ImGui::IsItemHovered() || active;
-            if (hv) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-            Tooltip(k == 0 ? "Drag to trim the start" : "Drag to trim the end");
-            if (ImGui::IsItemActivated()) {
-                PushUndo(e);
-                e.wasPlaying = pl.IsPlaying();
-                pl.Pause();
-                e.dragging = k;
-                e.dragIndex = (int)i;
-                e.selSection = (int)i;
-                e.selCaption = -1;
-            }
-            if (active) {
-                // Can't cross the neighbours or get shorter than half a second.
-                const double lo = i > 0 ? e.sections[i - 1].end : 0.0, hi = i + 1 < e.sections.size() ? e.sections[i + 1].start : dur;
-                const double t = snap(ImGui::GetIO().MousePos.x);
-                if (k == 0) s.start = Clamp(t, lo, std::max(lo, s.end - kMinSection));
-                else s.end = Clamp(t, std::min(hi, s.start + kMinSection), hi);
-                pl.Seek(k == 0 ? s.start : s.end, true);
-                Sync(e);
-            }
-            if (ImGui::IsItemDeactivated()) {
-                pl.Seek(k == 0 ? s.start : std::max(s.start, s.end - 0.05), false);
-                if (e.wasPlaying) pl.Play();
-                e.dragging = -1;
-            }
-            const float hvA = AnimHover(hid, hv);
-            ImGui::PopID();
-            const ImDrawFlags f = k == 0 ? ImDrawFlags_RoundCornersLeft : ImDrawFlags_RoundCornersRight;
-            if (hvA > 0.01f) dl->AddRectFilled(ImVec2(ha.x - S(3.0f), ha.y - S(3.0f)), ImVec2(hb.x + S(3.0f), hb.y + S(3.0f)), Accent2(0.25f * hvA), S(8.0f), f);
-            GradientRect(dl, ha, hb, Mix(Accent(), White(1.0f), 0.2f * hvA), Accent2(), S(6.0f), f);
-            const float gx = ha.x + hw * 0.5f;
-            for (int g = -1; g <= 1; g += 2)
-                dl->AddLine(ImVec2(gx + g * S(1.4f), ha.y + hh * 0.36f), ImVec2(gx + g * S(1.4f), hb.y - hh * 0.36f), White(0.85f), S(1.1f));
-        }
     }
 
     // Caption lane.

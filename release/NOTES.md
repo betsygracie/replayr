@@ -1,1 +1,1 @@
-New app badge: a detailed R with a play-button cut-out, used for the exe, taskbar, tray and sidebar.
+Editor timeline: trim handles always grab (the scrub area no longer steals the click), no more sticking while dragging, and no jump when you grab a handle.
