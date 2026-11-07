@@ -46,6 +46,9 @@ struct TranscodeRequest {
     std::vector<Caption> captions;
     bool hardware = true;                    // GPU encoder when there is one
     Look look;
+    // Audio mix: mix[o][k] is the gain from the source's k-th audio track into output track o.
+    // Empty = each source track goes to the same output track unchanged (up to 4).
+    std::vector<std::vector<float>> mix;
 };
 
 // Length of the output in seconds.

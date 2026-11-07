@@ -1,1 +1,1 @@
-Capture source: Game only (just the game window, no pop-ups), Whole screen, or Both (two files per clip). Game-not-visible card, hidden capture border, Replayr hidden from its own recordings, buffer size estimate, buffer status pill.
+Separate audio tracks: new recordings have Mixed + Game + Mic tracks. Editor shows Game and Mic as waveform lanes with mute, solo and 0-200% volume, heard live in the preview and applied on export. Option to keep separate tracks in the export.

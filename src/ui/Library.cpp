@@ -1,6 +1,7 @@
 // Shared library pieces: snapshot access, the card grid, the clip menu, rename/delete dialogs,
 // the snackbar and the empty state.
 #include "ui/AppContext.h"
+#include "media/ClipAudio.h"
 #include "ui/Anim.h"
 #include "ui/Icons.h"
 #include "ui/Theme.h"
@@ -184,6 +185,7 @@ void LeaveEditor(AppContext& ctx)
 {
     ctx.ui.editor.fullscreen = false;
     ctx.player.Close();
+    EditorAudio().Clear();
     GoTo(ctx, Page::Clips);
 }
 

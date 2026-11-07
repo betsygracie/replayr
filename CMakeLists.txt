@@ -106,6 +106,7 @@ set(CS_SOURCES
     src/engine/Transcoder.cpp
 
     src/media/MediaCache.cpp
+    src/media/ClipAudio.cpp
     src/media/Banner.cpp
 
     src/ui/App.cpp

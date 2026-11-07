@@ -242,7 +242,7 @@ public:
             std::vector<engine::Segment> segs = req.segments;
             if (segs.empty()) segs.push_back(engine::Segment{ req.source, req.start, req.end, 1.0 });
             const bool simple = segs.size() == 1 && segs[0].speed == 1.0 && req.captions.empty() && req.targetMB <= 0.0 && req.quality == 0 &&
-                                !req.banner && !req.look.Any();
+                                !req.banner && !req.look.Any() && req.mix.empty();
             const double key = !simple ? -1.0 : segs[0].start < 0.05 ? 0.0 : KeyframeAtOrBefore(segs[0].source, segs[0].start);
             const bool copy = simple && key >= 0.0 && segs[0].start - key < 0.06;
             std::string err;
@@ -259,6 +259,7 @@ public:
                 t.captions = req.captions;
                 t.hardware = req.hardware;
                 t.look = req.look;
+                t.mix = req.mix;
                 ok = Transcode(t, progress, cancel.get(), err);
             }
             if (!ok) message = *cancel ? "Export cancelled." : err;
@@ -568,16 +569,25 @@ private:
                 micIn_.reset();
             }
         }
-        if (sysIn_) {
+        // Track layout (the editor reads it back by count):
+        //   game + mic, separate: 1 Mixed (game + mic, for players that only play the first track),
+        //                         2 Game, 3 Mic
+        //   otherwise:            1 track with whatever is recorded
+        auto track = [&](std::initializer_list<int> slots) {
             Track t;
-            t.inputs.push_back({ sysIn_.get(), 0 });
-            if (micIn_ && !scfg_.separateTracks) t.inputs.push_back({ micIn_.get(), 1 });
+            for (int sl : slots) t.inputs.push_back({ sl == 0 ? sysIn_.get() : micIn_.get(), sl });
             tracks_.push_back(t);
-        }
-        if (micIn_ && (scfg_.separateTracks || !sysIn_)) {
-            Track t;
-            t.inputs.push_back({ micIn_.get(), 1 });
-            tracks_.push_back(t);
+        };
+        if (sysIn_ && micIn_) {
+            track({ 0, 1 });
+            if (scfg_.separateTracks) {
+                track({ 0 });
+                track({ 1 });
+            }
+        } else if (sysIn_) {
+            track({ 0 });
+        } else if (micIn_) {
+            track({ 1 });
         }
 
         sessionId_++;
@@ -913,14 +923,28 @@ private:
             gains[1] = cfg_.captureMic ? cfg_.micVolume : 0.0f;
             if (cfg_.pushToTalk && cfg_.pushToTalkKey && !platform::IsKeyDown(cfg_.pushToTalkKey)) gains[1] = 0.0f;
         }
+        // Each device is read once per call, then every track is mixed from those buffers (a device
+        // can feed several tracks: the Mixed track and its own).
+        int64_t n = INT64_MAX;
+        if (sysIn_) n = std::min(n, sysIn_->Available());
+        if (micIn_) n = std::min(n, micIn_->Available());
+        if (n <= 0 || n == INT64_MAX) return;
+        n = std::min<int64_t>(n, AudioInput::Rate);   // at most a second per call
+        AudioInput* dev[2] = { sysIn_.get(), micIn_.get() };
+        for (int sl = 0; sl < 2; ++sl) {
+            slot_[sl].assign((size_t)n * 2, 0.0f);
+            if (dev[sl]) dev[sl]->Take(slot_[sl].data(), n, gains[sl], false);
+        }
         for (size_t ti = 0; ti < tracks_.size(); ++ti) {
             Track& tr = tracks_[ti];
-            int64_t n = INT64_MAX;
-            for (auto& in : tr.inputs) n = std::min(n, in.first->Available());
-            if (n <= 0 || n == INT64_MAX) continue;
-            n = std::min<int64_t>(n, AudioInput::Rate);   // at most a second per call
             mix_.assign((size_t)n * 2, 0.0f);
-            for (size_t i = 0; i < tr.inputs.size(); ++i) tr.inputs[i].first->Take(mix_.data(), n, gains[tr.inputs[i].second], i > 0);
+            for (auto& in : tr.inputs) {
+                const std::vector<float>& src = slot_[in.second];
+                for (size_t i = 0; i < mix_.size(); ++i) mix_[i] += src[i];
+            }
+            if (tr.inputs.size() > 1)   // soft clip the mix so game + mic peaks don't crackle
+                for (float& v : mix_)
+                    if (std::fabs(v) > 0.9f) v = std::copysign(0.9f + 0.1f * std::tanh((std::fabs(v) - 0.9f) / 0.1f), v);
             // Part before the last cut goes to the previous segment.
             int64_t pos = tr.written;
             int64_t offset = 0;
@@ -1165,6 +1189,7 @@ private:
     std::unique_ptr<MediaWriter> writer_, prev_;
     std::wstring curPath_;
     std::vector<uint8_t> frameBuf_;
+    std::vector<float> slot_[2];
     std::vector<float> mix_;
     bool session_ = false, wantBuffer_ = false, forceCut_ = false, restartPending_ = false;
     bool recActive_ = false, recStartPending_ = false, recStopPending_ = false, reconfigAfterRec_ = false;

@@ -122,6 +122,7 @@ struct ExportRequest {
     BannerStyle bannerStyle;
     bool hardware = true;
     Look look;
+    std::vector<std::vector<float>> mix;   // audio mix matrix (see TranscodeRequest); empty = tracks as they are
 };
 
 class IClipEngine {

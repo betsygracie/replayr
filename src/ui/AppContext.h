@@ -21,6 +21,7 @@ class Window;
 class Hotkeys;
 class Thumbnailer;
 class MediaPlayer;
+class ClipAudio;
 class Filmstrips;
 class ImageCache;
 } // namespace cs
@@ -91,6 +92,12 @@ struct EditCaption {
     int position = 2;                // 0 top, 1 middle, 2 bottom
 };
 
+// One audio lane in the editor (Game, Mic, ...): live in the preview, applied on export.
+struct EditLane {
+    float gain = 1.0f;               // 0 .. 2
+    bool mute = false, solo = false;
+};
+
 struct EditorState {
     bool hasClip = false;            // shows "Editor" in the sidebar
     ClipInfo clip;
@@ -115,6 +122,8 @@ struct EditorState {
     int filter = 0;                  // 0 none, 1 vivid, 2 warm, 3 cool, 4 B&W
     float gain = 1.0f;               // 0 .. 2
     bool fadeIn = false, fadeOut = false;
+    std::vector<EditLane> lanes;     // sized from the clip's audio once it's loaded
+    bool keepTracks = false;         // export: the mix plus each lane as its own track
     double lastMouseMove = 0.0;
     char title[256] = {};
     bool holdPlayer = false;         // a rename is in flight: keep the file closed until it finishes
@@ -245,6 +254,7 @@ BannerStyle BannerStyleFor(const Settings& s);
 void DrawBannerPreview(AppContext& ctx, ImVec2 imageMin, float scale, int videoW, int videoH, double t);
 
 void OpenEditor(AppContext& ctx, const ClipInfo& clip);
+ClipAudio& EditorAudio();                                 // the editor clip's audio tracks (waveforms + live mix)
 void LeaveEditor(AppContext& ctx);                       // back to Clips; frees the player
 void OpenImage(AppContext& ctx, const ClipInfo& clip, const std::vector<int>& sequence);
 void CloseImage(AppContext& ctx);

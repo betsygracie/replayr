@@ -18,6 +18,7 @@
 #include "core/MediaPlayer.h"
 #include "core/Util.h"
 #include "media/Banner.h"
+#include "media/ClipAudio.h"
 #include "media/MediaCache.h"
 
 #include <algorithm>
@@ -208,6 +209,9 @@ void DrawBannerPreview(AppContext& ctx, ImVec2 ia, float scale, int vw, int vh, 
         dl->PopClipRect();
     }
 }
+
+std::vector<float> LaneGains(const EditorState& e);
+bool LanesChanged(const EditorState& e);
 
 namespace {
 
@@ -710,6 +714,21 @@ engine::ExportRequest BuildExport(AppContext& ctx)
     req.look.volume = e.gain;
     req.look.fadeIn = e.fadeIn;
     req.look.fadeOut = e.fadeOut;
+    // Audio lanes: re-mix only when something changed (otherwise the tracks are copied as they are).
+    const std::vector<ClipAudioLane> lanes = EditorAudio().Lanes();
+    if (!lanes.empty() && lanes.size() == e.lanes.size() && (LanesChanged(e) || e.keepTracks)) {
+        const int n = EditorAudio().TrackCount();
+        const std::vector<float> g = LaneGains(e);
+        std::vector<float> mixRow((size_t)n, 0.0f);
+        for (size_t i = 0; i < lanes.size(); ++i) mixRow[(size_t)lanes[i].track] = g[i];
+        req.mix.push_back(mixRow);
+        if (e.keepTracks && lanes.size() > 1)
+            for (size_t i = 0; i < lanes.size(); ++i) {
+                std::vector<float> row((size_t)n, 0.0f);
+                row[(size_t)lanes[i].track] = e.lanes[i].gain;   // each lane on its own, at its volume
+                req.mix.push_back(row);
+            }
+    }
     return req;
 }
 
@@ -754,7 +773,17 @@ void ExportPopup(AppContext& ctx)
     Text("Show Replayr banner", Pal().text, GetFonts().medium, Type::Body);
     ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + W - S(44.0f), rowY - S(3.0f)));
     Toggle("##banner", &e.banner);
-    const bool simple = e.sections.size() == 1 && e.sections[0].speed == 1.0f && e.captions.empty() && e.sizeLimit == 0 && e.quality == 0 && !e.banner;
+    if (e.lanes.size() > 1) {
+        const float ry = ImGui::GetCursorPosY();
+        Text("Keep separate audio tracks", Pal().text, GetFonts().medium, Type::Body);
+        ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + W - S(44.0f), ry - S(3.0f)));
+        Toggle("##keeptracks", &e.keepTracks);
+        TextWrapped("Adds Game and Mic as extra tracks after the mix, for editing elsewhere.", Pal().textFaint, W, nullptr, Type::Caption);
+        Gap(4.0f);
+    }
+    const bool looked = e.aspect != 0 || e.filter != 0 || e.gain != 1.0f || e.fadeIn || e.fadeOut;
+    const bool simple = e.sections.size() == 1 && e.sections[0].speed == 1.0f && e.captions.empty() && e.sizeLimit == 0 && e.quality == 0 &&
+                        !e.banner && !looked && !LanesChanged(e) && !e.keepTracks;
     TextWrapped(simple ? "Saved straight from the recording: no quality loss, near instant." : "Re-encodes on your GPU, so it takes a few seconds.",
                 Pal().textFaint, W, nullptr, Type::Caption);
     Gap(8.0f);
@@ -855,6 +884,113 @@ void FollowSections(AppContext& ctx, double pos)
 
 } // namespace
 
+// Effective gain per lane: muted lanes and, when anything is soloed, the others are silent.
+std::vector<float> LaneGains(const EditorState& e)
+{
+    bool anySolo = false;
+    for (const EditLane& l : e.lanes) anySolo = anySolo || l.solo;
+    std::vector<float> g;
+    for (const EditLane& l : e.lanes) g.push_back(l.mute || (anySolo && !l.solo) ? 0.0f : l.gain);
+    return g;
+}
+
+bool LanesChanged(const EditorState& e)
+{
+    for (const EditLane& l : e.lanes)
+        if (l.mute || l.solo || std::fabs(l.gain - 1.0f) > 0.001f) return true;
+    return false;
+}
+
+constexpr float kAudioLaneH = 30.0f, kAudioLaneGap = 4.0f;
+
+// Audio lanes under the timeline: waveform, name, mute / solo, and a volume slider (0-200%).
+void TrackLanes(AppContext& ctx, float x0, float x1, float y0, double dur, double pos)
+{
+    EditorState& e = ctx.ui.editor;
+    ClipAudio& au = EditorAudio();
+    const std::vector<ClipAudioLane> lanes = au.Lanes();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (lanes.empty()) {
+        if (au.Loading()) {
+            PushFont(GetFonts().regular, Type::Caption);
+            dl->AddText(ImVec2(x0, y0 + S(6.0f)), Pal().textFaint, "Reading the audio tracks\xE2\x80\xA6");
+            PopFont();
+        }
+        return;
+    }
+    static std::wstring cachedFor;
+    static std::vector<std::vector<float>> peaks;
+    if (cachedFor != au.Path()) {
+        cachedFor = au.Path();
+        peaks.clear();
+        for (const ClipAudioLane& l : lanes) peaks.push_back(au.Peaks(l.track));
+    }
+    const float lh = S(kAudioLaneH), w = x1 - x0;
+    for (size_t i = 0; i < lanes.size() && i < e.lanes.size(); ++i) {
+        EditLane& L = e.lanes[i];
+        const float ly = y0 + i * (lh + S(kAudioLaneGap));
+        const ImVec2 a(x0, ly), b(x1, ly + lh);
+        dl->AddRectFilled(a, b, IM_COL32(10, 2, 30, 120), S(6.0f));
+        // Waveform: each column shows the loudest moment it covers, dimmed outside the kept sections.
+        const std::vector<float>& pk = i < peaks.size() ? peaks[i] : peaks.back();
+        const bool silent = LaneGains(e)[i] <= 0.0f;
+        const ImU32 on = silent ? White(0.18f) : (i == 0 ? Accent(0.85f) : Accent2(0.85f));
+        const ImU32 off = White(0.10f);
+        const float mid = (a.y + b.y) * 0.5f, amp = lh * 0.42f * std::min(1.5f, std::max(0.35f, L.gain));
+        if (dur > 0.0 && !pk.empty()) {
+            for (float x = 0.0f; x < w; x += 2.0f) {
+                const double t0 = x / w * dur, t1 = (x + 2.0f) / w * dur;
+                const size_t b0 = (size_t)(t0 * ClipAudio::kPeaksPerSecond), b1 = std::min(pk.size(), (size_t)(t1 * ClipAudio::kPeaksPerSecond) + 1);
+                float v = 0.0f;
+                for (size_t k = b0; k < b1; ++k) v = std::max(v, pk[k]);
+                const float hgt = std::max(S(0.6f), std::min(1.0f, std::sqrt(v)) * amp);
+                dl->AddLine(ImVec2(x0 + x + 1.0f, mid - hgt), ImVec2(x0 + x + 1.0f, mid + hgt), SectionAt(e, (t0 + t1) * 0.5) >= 0 ? on : off, S(1.4f));
+            }
+        }
+        // Header: name + M + S, on a dark pill at the left.
+        ImGui::PushID((int)(2000 + i));
+        const float bs = S(20.0f);
+        PushFont(GetFonts().semibold, Type::Caption);
+        const float nw = ImGui::CalcTextSize(lanes[i].name.c_str()).x;
+        const ImVec2 ha(a.x + S(4.0f), a.y + S(4.0f)), hb(ha.x + nw + bs * 2.0f + S(26.0f), b.y - S(4.0f));
+        dl->AddRectFilled(ha, hb, IM_COL32(8, 2, 22, 210), S(5.0f));
+        dl->AddText(ImVec2(ha.x + S(8.0f), (ha.y + hb.y - ImGui::GetFontSize()) * 0.5f), White(silent ? 0.5f : 0.95f), lanes[i].name.c_str());
+        PopFont();
+        auto chip = [&](const char* id, const char* label, bool* v, ImU32 onCol, float x, const char* tip) {
+            const ImVec2 ca(x, (ha.y + hb.y - bs) * 0.5f), cb(ca.x + bs, ca.y + bs);
+            ImGui::SetCursorScreenPos(ca);
+            if (ImGui::InvisibleButton(id, ImVec2(bs, bs))) *v = !*v;
+            const bool hv = ImGui::IsItemHovered();
+            Tooltip(tip);
+            dl->AddRectFilled(ca, cb, *v ? onCol : White(hv ? 0.16f : 0.08f), S(4.0f));
+            PushFont(GetFonts().semibold, Type::Caption);
+            const ImVec2 ts = ImGui::CalcTextSize(label);
+            dl->AddText(ImVec2((ca.x + cb.x - ts.x) * 0.5f, (ca.y + cb.y - ts.y) * 0.5f), White(*v ? 1.0f : 0.7f), label);
+            PopFont();
+        };
+        const float cx = ha.x + nw + S(16.0f);
+        chip("##mute", "M", &L.mute, IM_COL32(220, 60, 90, 230), cx, "Mute this track");
+        chip("##solo", "S", &L.solo, IM_COL32(230, 170, 40, 230), cx + bs + S(4.0f), "Solo: hear only this track");
+        // Volume on the right.
+        const float sw = S(130.0f), tw = S(40.0f);
+        char vt[16];
+        snprintf(vt, sizeof(vt), "%d%%", (int)std::lround(L.gain * 100.0f));
+        dl->AddRectFilled(ImVec2(b.x - sw - tw - S(10.0f), a.y + S(4.0f)), ImVec2(b.x - S(4.0f), b.y - S(4.0f)), IM_COL32(8, 2, 22, 210), S(5.0f));
+        PushFont(GetFonts().medium, Type::Caption);
+        dl->AddText(ImVec2(b.x - sw - tw - S(2.0f), (a.y + b.y - ImGui::GetFontSize()) * 0.5f), White(L.gain > 1.001f ? 1.0f : 0.75f), vt);
+        PopFont();
+        ImGui::SetCursorScreenPos(ImVec2(b.x - sw - S(6.0f), (a.y + b.y - S(Tok::ControlHeight)) * 0.5f));
+        Slider("##lanevol", &L.gain, 0.0f, 2.0f, vt, sw - S(4.0f), 0.05f);
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) L.gain = 1.0f;
+        Tooltip("Track volume (double-click for 100%)");
+        ImGui::PopID();
+    }
+    if (dur > 0.0) {   // the playhead runs down through the lanes
+        const float px = x0 + (float)(pos / dur) * w;
+        dl->AddLine(ImVec2(px, y0), ImVec2(px, y0 + lanes.size() * (lh + S(kAudioLaneGap)) - S(kAudioLaneGap)), White(0.55f), S(1.5f));
+    }
+}
+
 void DrawEditor(AppContext& ctx)
 {
     EditorState& e = ctx.ui.editor;
@@ -885,19 +1021,38 @@ void DrawEditor(AppContext& ctx)
     const double pos = pl.Position();
     FollowSections(ctx, pos);
 
+    // Audio tracks: load once per clip; while the live mix runs, the player's own audio is muted.
+    ClipAudio& au = EditorAudio();
+    if (!e.holdPlayer && au.Path() != c.path) au.Load(c.path);
+    const std::vector<ClipAudioLane> audioLanes = au.Lanes();
+    if (e.lanes.size() != audioLanes.size()) e.lanes.assign(audioLanes.size(), EditLane{});
+    au.SetGains(LaneGains(e), std::min(2.0f, s.editor.volume * e.gain));
+    au.Follow(pos, pl.IsPlaying(), pl.Rate());
+    {
+        static float lastVol = -1.0f;
+        const float want = au.Playing() ? 0.0f : std::min(1.0f, s.editor.volume * e.gain);
+        if (want != lastVol) {
+            pl.SetVolume(want);
+            lastVol = want;
+        }
+    }
+
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const ImVec2 a = p, b(p.x + avail.x, p.y + avail.y);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     const float controlsH = S(46.0f), toolsH = S(48.0f), stripH = S(56.0f), laneH = S(26.0f);
-    const float bottomH = controlsH + toolsH + stripH + laneH + S(26.0f);
+    const float audioH = audioLanes.empty() ? (au.Loading() ? S(22.0f) : 0.0f)
+                                            : audioLanes.size() * (S(kAudioLaneH) + S(kAudioLaneGap)) + S(4.0f);
+    const float bottomH = controlsH + toolsH + stripH + laneH + S(26.0f) + audioH;
     auto bottom = [&](float x0, float x1, float y0) {
         Controls(ctx, ImVec2(x0, y0), ImVec2(x1, y0 + controlsH), pos, dur);
         Tools(ctx, ImVec2(x0, y0 + controlsH), ImVec2(x1, y0 + controlsH + toolsH), pos, dur);
         const float sy = y0 + controlsH + toolsH + S(10.0f);
         Timeline(ctx, ImVec2(x0 + S(12.0f), sy), ImVec2(x1 - S(12.0f), sy + stripH), ImVec2(x0 + S(12.0f), sy + stripH + S(6.0f)),
                  ImVec2(x1 - S(12.0f), sy + stripH + S(6.0f) + laneH), dur, pos);
+        TrackLanes(ctx, x0 + S(12.0f), x1 - S(12.0f), sy + stripH + S(6.0f) + laneH + S(8.0f), dur, pos);
     };
 
     if (e.fullscreen) {
@@ -971,6 +1126,12 @@ void DrawEditor(AppContext& ctx)
     ExportPopup(ctx);
     Keyboard(ctx, pos, dur);
     ImGui::Dummy(ImVec2(0, 0));
+}
+
+ClipAudio& EditorAudio()
+{
+    static ClipAudio audio;
+    return audio;
 }
 
 } // namespace cs::ui

@@ -32,6 +32,7 @@ std::wstring LogoPath()
         size_t n = 0;
         const void* data = platform::EmbeddedResource(L"LOGO_PNG", &n);
         const std::wstring p = LocalDataDir() + L"\\logo-" CS_LOGO_REV L".png";
+#ifdef _WIN32
         if (data && n) {
             FILE* f = _wfopen(p.c_str(), L"rb");
             if (f) fclose(f);
@@ -41,6 +42,10 @@ std::wstring LogoPath()
             }
             path = p;
         }
+#else
+        (void)data;
+        (void)n;
+#endif
     }
     return path;
 }

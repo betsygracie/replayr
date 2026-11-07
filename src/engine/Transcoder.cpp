@@ -217,8 +217,13 @@ bool Transcode(const TranscodeRequest& req, const std::function<void(float)>& pr
         return false;
     }
     const double srcFps = (double)first.fpsN / first.fpsD;
-    int outTracks = 0;
-    for (const Segment& sg : req.segments) outTracks = std::max(outTracks, std::min(2, Probe(sg.source).audioTracks));
+    int inTracks = 0;
+    for (const Segment& sg : req.segments) inTracks = std::max(inTracks, std::min(4, Probe(sg.source).audioTracks));
+    const int outTracks = req.mix.empty() ? inTracks : (inTracks > 0 ? std::min(4, (int)req.mix.size()) : 0);
+    auto gainOf = [&](int o, int k) -> float {
+        if (req.mix.empty()) return o == k ? 1.0f : 0.0f;
+        return k < (int)req.mix[(size_t)o].size() ? req.mix[(size_t)o][(size_t)k] : 0.0f;
+    };
 
     // Output size, frame rate and bitrate.
     UINT32 W = first.w & ~1u, H = first.h & ~1u;
@@ -509,8 +514,8 @@ bool Transcode(const TranscodeRequest& req, const std::function<void(float)>& pr
         }
         // Track i of the output takes this clip's i-th audio stream, converted to 48 kHz stereo.
         std::vector<int> trackOf(16, -1);
-        std::vector<bool> trackDone((size_t)outTracks, true);
-        for (int k = 0; k < outTracks && k < (int)audioIdx.size(); ++k) {
+        std::vector<bool> trackDone((size_t)inTracks, true);
+        for (int k = 0; k < inTracks && k < (int)audioIdx.size(); ++k) {
             ComPtr<IMFMediaType> out;
             MFCreateMediaType(&out);
             out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
@@ -529,6 +534,44 @@ bool Transcode(const TranscodeRequest& req, const std::function<void(float)>& pr
             trackOf[audioIdx[(size_t)k]] = k;
             trackDone[(size_t)k] = false;
         }
+
+        // Mixing: each output track accumulates its inputs here (float, from the output sample it has
+        // written up to) and writes out as far as every contributing input has got.
+        const int64_t segStartSample = (int64_t)std::llround(outBase * kRate), segEndSample = (int64_t)std::llround((outBase + outLen) * kRate);
+        std::vector<std::vector<float>> acc((size_t)outTracks);
+        std::vector<int64_t> inEnd((size_t)inTracks, segStartSample);
+        std::vector<short> pcmOut;
+        auto commit = [&](int o, bool all) -> HRESULT {
+            TrackOut& tr = tracks[(size_t)o];
+            std::vector<float>& a = acc[(size_t)o];
+            int64_t end = tr.written + (int64_t)(a.size() / kChannels);
+            if (!all)
+                for (int k = 0; k < inTracks; ++k)
+                    if (gainOf(o, k) != 0.0f && !trackDone[(size_t)k]) end = std::min(end, inEnd[(size_t)k]);
+            const int64_t n = std::min<int64_t>(end - tr.written, (int64_t)(a.size() / kChannels));
+            if (n <= 0) return S_OK;
+            pcmOut.resize((size_t)(n * kChannels));
+            for (size_t i = 0; i < pcmOut.size(); ++i) pcmOut[i] = (short)std::clamp((int)std::lround(a[i]), -32768, 32767);
+            const HRESULT r = writeAudio(tr, pcmOut.data(), n);
+            a.erase(a.begin(), a.begin() + (ptrdiff_t)(n * kChannels));
+            return r;
+        };
+        auto contribute = [&](int k, int64_t at, const short* data, int64_t count) {
+            for (int o = 0; o < outTracks; ++o) {
+                const float g = gainOf(o, k);
+                if (g == 0.0f) continue;
+                TrackOut& tr = tracks[(size_t)o];
+                std::vector<float>& a = acc[(size_t)o];
+                int64_t from = 0;
+                if (at < tr.written) from = tr.written - at;   // already written: drop
+                if (from >= count) continue;
+                const size_t off = (size_t)((at + from - tr.written) * kChannels), need = off + (size_t)((count - from) * kChannels);
+                if (a.size() < need) a.resize(need, 0.0f);
+                for (int64_t i = from; i < count; ++i)
+                    for (UINT32 c = 0; c < kChannels; ++c) a[off + (size_t)((i - from) * kChannels + c)] += data[i * kChannels + c] * g;
+            }
+            inEnd[(size_t)k] = std::max(inEnd[(size_t)k], at + count);
+        };
 
         PROPVARIANT pos;
         PropVariantInit(&pos);
@@ -604,7 +647,6 @@ bool Transcode(const TranscodeRequest& req, const std::function<void(float)>& pr
                 }
                 if (progress) progress((float)std::min(1.0, nextGrid / total));
             } else if (track >= 0 && !trackDone[(size_t)track]) {
-                TrackOut& tr = tracks[(size_t)track];
                 ComPtr<IMFMediaBuffer> buf;
                 if (FAILED(s->ConvertToContiguousBuffer(&buf))) continue;
                 BYTE* data = nullptr;
@@ -634,11 +676,9 @@ bool Transcode(const TranscodeRequest& req, const std::function<void(float)>& pr
                         }
                         outData = resampled.data();
                     }
-                    int64_t skip = 0;
-                    wr = alignAudio(tr, (int64_t)std::llround((outBase + startRel / speed) * kRate), skip);
-                    const int64_t maxOut = (int64_t)std::llround(segEndOut * kRate) - tr.written;
-                    const int64_t toWrite = std::min(outCount - skip, maxOut);
-                    if (SUCCEEDED(wr) && toWrite > 0) wr = writeAudio(tr, outData + skip * kChannels, toWrite);
+                    const int64_t at = (int64_t)std::llround((outBase + startRel / speed) * kRate);
+                    const int64_t toWrite = std::min(outCount, segEndSample - at);
+                    if (toWrite > 0) contribute(track, at, outData, toWrite);
                 }
                 buf->Unlock();
                 if (FAILED(wr)) {
@@ -648,6 +688,11 @@ bool Transcode(const TranscodeRequest& req, const std::function<void(float)>& pr
                 if (startRel + (double)(n - firstS) / kRate >= segLen) {
                     trackDone[(size_t)track] = true;
                     reader->SetStreamSelection(si, FALSE);
+                }
+                for (int o = 0; o < outTracks && SUCCEEDED(wr); ++o) wr = commit(o, false);
+                if (FAILED(wr)) {
+                    abandon();
+                    return Fail(error, "Couldn't export the audio", wr);
                 }
             }
         }
@@ -660,9 +705,11 @@ bool Transcode(const TranscodeRequest& req, const std::function<void(float)>& pr
             }
             nextGrid += frameDur;
         }
-        for (TrackOut& tr : tracks) {
+        for (int o = 0; o < outTracks; ++o) {
+            TrackOut& tr = tracks[(size_t)o];
+            hr = commit(o, true);
             int64_t skip = 0;
-            hr = alignAudio(tr, (int64_t)std::llround(segEndOut * kRate), skip);
+            if (SUCCEEDED(hr)) hr = alignAudio(tr, (int64_t)std::llround(segEndOut * kRate), skip);
             if (FAILED(hr)) {
                 abandon();
                 return Fail(error, "Couldn't export the audio", hr);
