@@ -71,6 +71,7 @@
 #define ICON_SIGNOUT       "\xEF\x8E\xB1"   // U+F3B1
 #define ICON_UPLOAD        "\xEE\xA2\x98"   // U+E898
 #define ICON_LOCK          "\xEE\x9C\xAE"   // U+E72E
+#define ICON_KEY           "\xEE\xA3\x97"   // U+E8D7
 #define ICON_GLOBE         "\xEE\x9D\xB4"   // U+E774
 #define ICON_LINK          "\xEE\x9C\x9B"   // U+E71B
 #define ICON_CHECK         "\xEE\x9C\xBE"   // U+E73E

@@ -9,16 +9,17 @@ binding = "DB"
 database_name = "replayr"
 database_id = "PUT-YOUR-D1-DATABASE-ID-HERE"
 
-[[r2_buckets]]
-binding = "CLIPS"
-bucket_name = "replayr-clips"
+# Cloud clip uploads (optional). R2 is free up to 10 GB but Cloudflare asks for a card to enable it,
+# so it's off by default. To turn it on: create the bucket, then uncomment these three lines.
+# [[r2_buckets]]
+# binding = "CLIPS"
+# bucket_name = "replayr-clips"
 
 [vars]
 # Shown on share pages. Change if you use your own domain.
 APP_NAME = "Replayr"
 MAX_UPLOAD_MB = "95"          # the free plan accepts request bodies up to 100 MB
 
-# Secrets (set with `npx wrangler secret put NAME`, never put them in this file):
-#   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET   from https://discord.com/developers/applications
-#   STEAM_API_KEY                              from https://steamcommunity.com/dev/apikey (for names/avatars)
-#   TOKEN_SECRET                               any long random string (signs access tokens)
+# Secrets (set as GitHub repository secrets; the deploy workflow uploads them):
+#   TOKEN_SECRET   any long random string (signs access tokens)
+#   ADMIN_KEY      your private key for the invite-code page at /admin (16+ characters)

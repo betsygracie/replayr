@@ -1,18 +1,12 @@
-// Replayr account server: sign in with Discord or Steam, upload clips, share links.
-// Runs on Cloudflare Workers (free plan) with D1 (database) and R2 (clip files).
+// Replayr account server: invite-only accounts (username + password, no emails), clip sharing.
+// Runs on Cloudflare Workers + D1, both free with no card. Clip uploads need R2 (free tier, but
+// Cloudflare asks for a card to turn it on); without the CLIPS binding, uploads are simply off.
 //
-// Sign-in (no passwords or emails are ever handled here):
-//   1. The app opens the browser at /auth/<discord|steam>/start?port=P&state=S&challenge=C, where C is
-//      base64url(SHA-256(verifier)) and the app keeps the verifier (PKCE).
-//   2. The provider signs the user in and sends them back to /auth/<provider>/callback.
-//   3. We create a one-time code bound to C and send the browser to http://127.0.0.1:P/callback.
-//   4. The app posts the code + verifier to /auth/token and gets an access token (1 hour) and a
-//      refresh token (60 days, rotated on every use, stored only as a hash).
+// Tokens: an access token (1 hour) and a refresh token (60 days, rotated on every use, stored only
+// as a hash). Passwords are stored as PBKDF2-SHA256 hashes with a per-user salt.
 
 const ACCESS_TTL = 3600;
 const REFRESH_TTL = 60 * 86400;
-const CODE_TTL = 120;
-const PENDING_TTL = 600;
 
 // ---------------------------------------------------------------------------------------------
 // Helpers
@@ -107,8 +101,8 @@ async function authUser(request, env) {
   return user;
 }
 
-function publicUser(u) {
-  return { id: u.id, name: u.display_name, avatar: u.avatar_url, provider: u.provider, usedBytes: u.used_bytes, quotaBytes: u.quota_bytes };
+function publicUser(u, env) {
+  return { id: u.id, name: u.display_name, avatar: null, provider: 'replayr', storage: !!(env && env.CLIPS), usedBytes: u.used_bytes, quotaBytes: u.quota_bytes };
 }
 
 function publicClip(c, origin) {
@@ -122,121 +116,142 @@ function publicClip(c, origin) {
 // Sign-in
 // ---------------------------------------------------------------------------------------------
 
-async function startLogin(request, env, url, provider) {
-  if (limited(request, 'start', 30, 600)) return fail(429, 'Too many sign-in attempts. Try again in a few minutes.');
-  const port = parseInt(url.searchParams.get('port') || '', 10);
-  const appState = url.searchParams.get('state') || '';
-  const challenge = url.searchParams.get('challenge') || '';
-  if (!(port >= 1024 && port <= 65535) || !/^[A-Za-z0-9_-]{16,128}$/.test(appState) || !/^[A-Za-z0-9_-]{43}$/.test(challenge))
-    return fail(400, 'Bad sign-in request.');
-  const state = randomToken(24);
-  await env.DB.prepare('DELETE FROM pending WHERE expires_at < ?').bind(now()).run();
-  await env.DB.prepare('INSERT INTO pending (state, port, app_state, challenge, expires_at) VALUES (?, ?, ?, ?, ?)')
-    .bind(state, port, appState, challenge, now() + PENDING_TTL).run();
-  const origin = url.origin;
-  if (provider === 'discord') {
-    const q = new URLSearchParams({
-      response_type: 'code', client_id: env.DISCORD_CLIENT_ID, scope: 'identify', state,
-      redirect_uri: `${origin}/auth/discord/callback`, prompt: 'none',
-    });
-    return Response.redirect(`https://discord.com/oauth2/authorize?${q}`, 302);
-  }
-  const q = new URLSearchParams({
-    'openid.ns': 'http://specs.openid.net/auth/2.0',
-    'openid.mode': 'checkid_setup',
-    'openid.return_to': `${origin}/auth/steam/callback?state=${state}`,
-    'openid.realm': origin,
-    'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
-    'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
-  });
-  return Response.redirect(`https://steamcommunity.com/openid/login?${q}`, 302);
+// Accounts are a username + password, and making one needs an invite code that only the owner can
+// generate (at /admin, with the ADMIN_KEY secret). No emails, no third-party sign-in.
+const NAME_RE = /^[A-Za-z0-9_.-]{3,24}$/;
+const PBKDF2_ITERATIONS = 100000;
+
+async function hashPassword(password, saltB64) {
+  const salt = saltB64 ? Uint8Array.from(atob(saltB64), (c) => c.charCodeAt(0)) : crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: PBKDF2_ITERATIONS }, key, 256);
+  return { hash: b64url(bits), salt: btoa(String.fromCharCode(...salt)) };
 }
 
-async function takePending(env, state) {
-  if (!state) return null;
-  const p = await env.DB.prepare('SELECT * FROM pending WHERE state = ?').bind(state).first();
-  if (!p) return null;
-  await env.DB.prepare('DELETE FROM pending WHERE state = ?').bind(state).run();
-  return p.expires_at >= now() ? p : null;
+function sameString(a, b) {   // constant-time compare
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
 }
 
-async function upsertUser(env, provider, providerId, name, avatar) {
-  const existing = await env.DB.prepare('SELECT * FROM users WHERE provider = ? AND provider_id = ?').bind(provider, providerId).first();
-  if (existing) {
-    await env.DB.prepare('UPDATE users SET display_name = ?, avatar_url = ? WHERE id = ?').bind(name, avatar, existing.id).run();
-    return { ...existing, display_name: name, avatar_url: avatar };
-  }
-  const id = randomToken(12);
-  await env.DB.prepare('INSERT INTO users (id, provider, provider_id, display_name, avatar_url, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .bind(id, provider, providerId, name, avatar, now()).run();
-  return await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(id).first();
+function normCode(c) {
+  return String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-async function finishLogin(env, user, pending) {
-  if (user.banned) return html(page('Account suspended', 'This account can no longer sign in.'), 403);
-  const code = randomToken(32);
-  await env.DB.prepare('DELETE FROM login_codes WHERE expires_at < ?').bind(now()).run();
-  await env.DB.prepare('INSERT INTO login_codes (code_hash, user_id, challenge, expires_at) VALUES (?, ?, ?, ?)')
-    .bind(await sha256(code), user.id, pending.challenge, now() + CODE_TTL).run();
-  const q = new URLSearchParams({ code, state: pending.app_state });
-  return Response.redirect(`http://127.0.0.1:${pending.port}/callback?${q}`, 302);
+async function register(request, env) {
+  if (limited(request, 'register', 10, 3600)) return fail(429, 'Too many attempts. Try again later.');
+  const b = await request.json().catch(() => ({}));
+  const name = String(b.username || '').trim(), password = String(b.password || ''), code = normCode(b.code);
+  if (!NAME_RE.test(name)) return fail(400, 'Usernames are 3-24 letters, numbers, dots, dashes or underscores.');
+  if (password.length < 8 || password.length > 200) return fail(400, 'Use a password of at least 8 characters.');
+  if (!code) return fail(400, 'You need an invite code to make an account.');
+  const invite = await env.DB.prepare('SELECT * FROM invite_codes WHERE code = ?').bind(code).first();
+  if (!invite || invite.used_by) return fail(400, "That invite code isn't valid or has already been used.");
+  if (await env.DB.prepare('SELECT 1 FROM users WHERE username = ? COLLATE NOCASE').bind(name).first())
+    return fail(409, 'That username is taken.');
+  const { hash, salt } = await hashPassword(password);
+  const id = randomToken(12), t = now();
+  // Claim the code first: if two people race for it, only one UPDATE succeeds.
+  const claim = await env.DB.prepare('UPDATE invite_codes SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL').bind(id, t, code).run();
+  if (!claim.meta || claim.meta.changes !== 1) return fail(400, "That invite code isn't valid or has already been used.");
+  await env.DB.prepare('INSERT INTO users (id, username, pass_hash, pass_salt, display_name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(id, name, hash, salt, name, t).run();
+  const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(id).first();
+  return json(await issueTokens(env, user, b.device));
 }
 
-async function discordCallback(env, url) {
-  const pending = await takePending(env, url.searchParams.get('state'));
-  if (!pending) return html(page('Sign-in expired', 'Go back to Replayr and try again.'), 400);
-  const code = url.searchParams.get('code');
-  if (!code) return html(page('Sign-in cancelled', 'You can close this tab.'), 400);
-  const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: env.DISCORD_CLIENT_ID, client_secret: env.DISCORD_CLIENT_SECRET, grant_type: 'authorization_code',
-      code, redirect_uri: `${url.origin}/auth/discord/callback`,
-    }),
-  });
-  if (!tokenRes.ok) return html(page("Couldn't sign in", 'Discord said no. Go back to Replayr and try again.'), 502);
-  const { access_token } = await tokenRes.json();
-  const meRes = await fetch('https://discord.com/api/users/@me', { headers: { authorization: `Bearer ${access_token}` } });
-  if (!meRes.ok) return html(page("Couldn't sign in", 'Discord did not share your profile.'), 502);
-  const me = await meRes.json();
-  const avatar = me.avatar ? `https://cdn.discordapp.com/avatars/${me.id}/${me.avatar}.png?size=128` : null;
-  const user = await upsertUser(env, 'discord', me.id, (me.global_name || me.username || 'Discord user').slice(0, 64), avatar);
-  return finishLogin(env, user, pending);
+async function login(request, env) {
+  if (limited(request, 'login', 20, 600)) return fail(429, 'Too many attempts. Wait a few minutes.');
+  const b = await request.json().catch(() => ({}));
+  const name = String(b.username || '').trim(), password = String(b.password || '');
+  const user = name ? await env.DB.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE').bind(name).first() : null;
+  // Hash even when the user doesn't exist, so timing doesn't reveal which usernames are taken.
+  const { hash } = await hashPassword(password, user ? user.pass_salt : 'AAAAAAAAAAAAAAAAAAAAAA==');
+  if (!user || !sameString(hash, user.pass_hash)) return fail(401, 'Wrong username or password.');
+  if (user.banned) return fail(403, 'This account has been disabled.');
+  return json(await issueTokens(env, user, b.device));
 }
 
-async function steamCallback(env, url) {
-  const pending = await takePending(env, url.searchParams.get('state'));
-  if (!pending) return html(page('Sign-in expired', 'Go back to Replayr and try again.'), 400);
-  const p = url.searchParams;
-  if (p.get('openid.mode') !== 'id_res') return html(page('Sign-in cancelled', 'You can close this tab.'), 400);
-  // Only Steam's endpoint, and only for our own return URL.
-  if (p.get('openid.op_endpoint') !== 'https://steamcommunity.com/openid/login' || !(p.get('openid.return_to') || '').startsWith(`${url.origin}/auth/steam/callback`))
-    return html(page("Couldn't sign in", 'That sign-in response was not from Steam.'), 400);
-  const m = /^https:\/\/steamcommunity\.com\/openid\/id\/(\d{17})$/.exec(p.get('openid.claimed_id') || '');
-  if (!m) return html(page("Couldn't sign in", 'Steam did not send an account id.'), 400);
-  // Ask Steam to confirm the signature.
-  const check = new URLSearchParams();
-  for (const [k, v] of p) if (k.startsWith('openid.')) check.set(k, v);
-  check.set('openid.mode', 'check_authentication');
-  const res = await fetch('https://steamcommunity.com/openid/login', {
-    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: check,
-  });
-  if (!res.ok || !/is_valid\s*:\s*true/.test(await res.text())) return html(page("Couldn't sign in", 'Steam could not confirm the sign-in.'), 400);
-  const steamId = m[1];
-  let name = 'Steam user', avatar = null;
-  if (env.STEAM_API_KEY) {
-    const s = await fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${env.STEAM_API_KEY}&steamids=${steamId}`);
-    if (s.ok) {
-      const player = (await s.json())?.response?.players?.[0];
-      if (player) {
-        name = (player.personaname || name).slice(0, 64);
-        avatar = player.avatarfull || player.avatarmedium || null;
-      }
+async function changePassword(request, env, user) {
+  const b = await request.json().catch(() => ({}));
+  const { hash } = await hashPassword(String(b.oldPassword || ''), user.pass_salt);
+  if (!sameString(hash, user.pass_hash)) return fail(401, 'Your current password is wrong.');
+  const np = String(b.newPassword || '');
+  if (np.length < 8 || np.length > 200) return fail(400, 'Use a password of at least 8 characters.');
+  const h = await hashPassword(np);
+  await env.DB.prepare('UPDATE users SET pass_hash = ?, pass_salt = ? WHERE id = ?').bind(h.hash, h.salt, user.id).run();
+  await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id).run();
+  return json(await issueTokens(env, { ...user }, b.device));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Invite codes (owner only)
+// ---------------------------------------------------------------------------------------------
+
+function isAdmin(request, env) {
+  const key = request.headers.get('x-admin-key') || '';
+  return !!env.ADMIN_KEY && env.ADMIN_KEY.length >= 16 && sameString(key, env.ADMIN_KEY);
+}
+
+function newCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const r = crypto.getRandomValues(new Uint8Array(12));
+  const c = Array.from(r, (b) => alphabet[b % alphabet.length]).join('');
+  return `${c.slice(0, 4)}-${c.slice(4, 8)}-${c.slice(8, 12)}`;
+}
+
+async function adminApi(request, env, path, method) {
+  if (limited(request, 'admin', 30, 600)) return fail(429, 'Too many attempts.');
+  if (!isAdmin(request, env)) return fail(401, 'Wrong admin key.');
+  if (method === 'POST' && path === '/admin/codes') {
+    const b = await request.json().catch(() => ({}));
+    const n = Math.max(1, Math.min(50, Number(b.count) || 1)), note = String(b.note || '').slice(0, 80);
+    const codes = [];
+    for (let i = 0; i < n; i++) {
+      const c = newCode();
+      await env.DB.prepare('INSERT INTO invite_codes (code, note, created_at) VALUES (?, ?, ?)').bind(normCode(c), note, now()).run();
+      codes.push(c);
     }
+    return json({ codes });
   }
-  const user = await upsertUser(env, 'steam', steamId, name, avatar);
-  return finishLogin(env, user, pending);
+  if (method === 'GET' && path === '/admin/codes') {
+    const r = await env.DB.prepare(`SELECT c.code, c.note, c.created_at, c.used_at, u.username AS used_by
+      FROM invite_codes c LEFT JOIN users u ON u.id = c.used_by ORDER BY c.created_at DESC LIMIT 200`).all();
+    return json({ codes: r.results.map((c) => ({ ...c, code: `${c.code.slice(0, 4)}-${c.code.slice(4, 8)}-${c.code.slice(8)}` })) });
+  }
+  if (method === 'DELETE' && path.startsWith('/admin/codes/')) {
+    await env.DB.prepare('DELETE FROM invite_codes WHERE code = ? AND used_by IS NULL').bind(normCode(path.slice(13))).run();
+    return json({ ok: true });
+  }
+  return fail(404, 'Not found.');
+}
+
+function adminPage() {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>Replayr invite codes</title><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:system-ui,sans-serif;color:#fff;background:radial-gradient(circle at 20% 15%,#6a2be0 0,transparent 45%),radial-gradient(circle at 85% 80%,#c42a8e 0,transparent 40%),#0b0614;display:flex;justify-content:center;padding:48px 16px}
+.card{width:100%;max-width:560px;padding:28px;border-radius:20px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18)}
+h1{margin:0 0 4px;font-size:22px}p{color:rgba(255,255,255,.65);margin:0 0 18px}
+input,button{font:inherit;border-radius:10px;border:1px solid rgba(255,255,255,.2);padding:10px 12px;color:#fff;background:rgba(0,0,0,.25)}
+button{background:linear-gradient(90deg,#7b2ff7,#e2348f);border:0;cursor:pointer;font-weight:600}button.ghost{background:rgba(255,255,255,.1)}
+.row{display:flex;gap:8px;margin-bottom:10px}.row input{flex:1}
+.code{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-radius:10px;background:rgba(0,0,0,.22);margin-top:6px;font-family:ui-monospace,monospace}
+.used{opacity:.45}.small{font-family:system-ui;font-size:12px;color:rgba(255,255,255,.6)}#err{color:#ff8fb3;min-height:20px}
+</style></head><body><div class="card"><h1>Invite codes</h1><p>Only you can make these. Each code makes one account.</p>
+<div class="row"><input id="key" type="password" placeholder="Admin key" autocomplete="current-password"></div>
+<div class="row"><input id="note" placeholder="Who is it for? (optional)"><input id="count" type="number" min="1" max="50" value="1" style="max-width:80px"><button id="gen">Generate</button></div>
+<div id="err"></div><div id="list"></div></div><script>
+const $=(i)=>document.getElementById(i);$('key').value=sessionStorage.getItem('k')||'';
+const api=(m,p,b)=>fetch(p,{method:m,headers:{'x-admin-key':$('key').value,'content-type':'application/json'},body:b?JSON.stringify(b):undefined}).then(async r=>{const j=await r.json();if(!r.ok)throw new Error(j.error);return j});
+const esc=(s)=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]);
+async function load(){$('err').textContent='';sessionStorage.setItem('k',$('key').value);try{const j=await api('GET','/admin/codes');
+$('list').innerHTML=j.codes.map(c=>'<div class="code'+(c.used_by?' used':'')+'"><span>'+esc(c.code)+' <span class="small">'+esc(c.note)+(c.used_by?' &middot; used by '+esc(c.used_by):'')+'</span></span>'+
+(c.used_by?'':'<span><button class="ghost" onclick="navigator.clipboard.writeText(\''+c.code+'\')">Copy</button> <button class="ghost" onclick="del(\''+c.code+'\')">Delete</button></span>')+'</div>').join('')||'<p>No codes yet.</p>';}catch(e){$('err').textContent=e.message}}
+async function del(c){await api('DELETE','/admin/codes/'+c).catch(e=>$('err').textContent=e.message);load()}
+$('gen').onclick=async()=>{try{await api('POST','/admin/codes',{count:$('count').value,note:$('note').value});$('note').value='';load()}catch(e){$('err').textContent=e.message}};
+$('key').onchange=load;if($('key').value)load();
+</script></body></html>`;
 }
 
 async function issueTokens(env, user, device) {
@@ -245,20 +260,7 @@ async function issueTokens(env, user, device) {
   await env.DB.prepare('INSERT INTO sessions (refresh_hash, user_id, device, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
     .bind(await sha256(refresh), user.id, (device || 'PC').slice(0, 64), t, t, t + REFRESH_TTL).run();
   const access = await signJwt({ sub: user.id, exp: t + ACCESS_TTL }, env.TOKEN_SECRET);
-  return { accessToken: access, refreshToken: refresh, expiresIn: ACCESS_TTL, user: publicUser(user) };
-}
-
-async function exchangeCode(request, env) {
-  if (limited(request, 'token', 30, 600)) return fail(429, 'Too many attempts.');
-  const body = await request.json().catch(() => ({}));
-  if (typeof body.code !== 'string' || typeof body.verifier !== 'string') return fail(400, 'Bad request.');
-  const hash = await sha256(body.code);
-  const row = await env.DB.prepare('SELECT * FROM login_codes WHERE code_hash = ?').bind(hash).first();
-  if (row) await env.DB.prepare('DELETE FROM login_codes WHERE code_hash = ?').bind(hash).run();
-  if (!row || row.expires_at < now() || (await sha256(body.verifier)) !== row.challenge) return fail(400, 'That sign-in has expired. Try again.');
-  const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(row.user_id).first();
-  if (!user || user.banned) return fail(403, 'This account can no longer sign in.');
-  return json(await issueTokens(env, user, body.device));
+  return { accessToken: access, refreshToken: refresh, expiresIn: ACCESS_TTL, user: publicUser(user, env) };
 }
 
 async function refreshTokens(request, env) {
@@ -325,7 +327,7 @@ async function uploadClip(request, env, user, id, origin) {
 
 async function myClips(env, user, origin) {
   const rows = await env.DB.prepare("SELECT * FROM clips WHERE user_id = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 500").bind(user.id).all();
-  return json({ clips: rows.results.map((c) => publicClip(c, origin)), user: publicUser(user) });
+  return json({ clips: rows.results.map((c) => publicClip(c, origin)), user: publicUser(user, env) });
 }
 
 async function updateClip(request, env, user, id, origin) {
@@ -341,7 +343,7 @@ async function updateClip(request, env, user, id, origin) {
 async function deleteClip(env, user, id) {
   const clip = await env.DB.prepare('SELECT * FROM clips WHERE id = ? AND user_id = ?').bind(id, user.id).first();
   if (!clip) return fail(404, 'Clip not found.');
-  await env.CLIPS.delete(`clips/${id}.mp4`);
+  if (env.CLIPS) await env.CLIPS.delete(`clips/${id}.mp4`);
   const freed = clip.status === 'ready' ? clip.size_bytes : 0;
   await env.DB.batch([
     env.DB.prepare('DELETE FROM clips WHERE id = ?').bind(id),
@@ -457,10 +459,10 @@ export default {
     const method = request.method;
     try {
       let m;
-      if (method === 'GET' && (m = /^\/auth\/(discord|steam)\/start$/.exec(path))) return await startLogin(request, env, url, m[1]);
-      if (method === 'GET' && path === '/auth/discord/callback') return await discordCallback(env, url);
-      if (method === 'GET' && path === '/auth/steam/callback') return await steamCallback(env, url);
-      if (method === 'POST' && path === '/auth/token') return await exchangeCode(request, env);
+      if (method === 'POST' && path === '/auth/register') return await register(request, env);
+      if (method === 'POST' && path === '/auth/login') return await login(request, env);
+      if (method === 'GET' && path === '/admin') return html(adminPage());
+      if (path.startsWith('/admin/')) return await adminApi(request, env, path, method);
       if (method === 'POST' && path === '/auth/refresh') return await refreshTokens(request, env);
       if (method === 'POST' && path === '/auth/logout') return await logout(request, env);
 
@@ -468,10 +470,13 @@ export default {
       if (method === 'GET' && (m = /^\/c\/([A-Za-z0-9]{10})$/.exec(path))) return await sharePage(env, m[1], url.origin, ctx);
       if (method === 'POST' && (m = /^\/c\/([A-Za-z0-9]{10})\/report$/.exec(path))) return await report(request, env, m[1]);
 
-      if (path === '/me' || path.startsWith('/clips')) {
+      if (!env.CLIPS && (path.startsWith('/c/') || (path.startsWith('/clips') && method !== 'GET' && method !== 'DELETE')))
+        return fail(503, 'Cloud clips are turned off on this server.');
+      if (path === '/me' || path.startsWith('/me/') || path.startsWith('/clips')) {
         const user = await authUser(request, env);
         if (!user) return fail(401, 'Signed out. Sign in again.');
-        if (method === 'GET' && path === '/me') return json(publicUser(user));
+        if (method === 'GET' && path === '/me') return json(publicUser(user, env));
+        if (method === 'POST' && path === '/me/password') return await changePassword(request, env, user);
         if (method === 'GET' && path === '/clips') return await myClips(env, user, url.origin);
         if (method === 'POST' && path === '/clips') return await createClip(request, env, user);
         if (method === 'PUT' && (m = /^\/clips\/([A-Za-z0-9]{10})\/upload$/.exec(path))) return await uploadClip(request, env, user, m[1], url.origin);

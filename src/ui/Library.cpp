@@ -689,7 +689,7 @@ void LibraryOverlays(AppContext& ctx)
             lib.tagBuf[0] = 0;
             lib.openTags = true;
         }
-        if (video && ctx.account) {
+        if (video && ctx.account && !(ctx.account->State() == AccountState::SignedIn && !ctx.account->User().cloudClips)) {
             if (MenuItem(ICON_UPLOAD, "Upload & copy link")) UploadClip(ctx, live ? *live : c);
         }
         if (video) {

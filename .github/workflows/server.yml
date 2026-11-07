@@ -1,0 +1,54 @@
+# Deploys the account server (server/) to Cloudflare Workers + D1 (free, no card needed).
+# Repository secrets needed: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, ADMIN_KEY.
+# TOKEN_SECRET is generated on Cloudflare the first time and never leaves it.
+name: Deploy account server
+on:
+  push:
+    branches: [main]
+    paths: [server/**, .github/workflows/server.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check secrets
+        run: |
+          [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "::error::Add the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets."; exit 1; }
+      - run: npm i -g wrangler@4
+      - name: Database
+        working-directory: server
+        run: |
+          id=$(wrangler d1 list --json | jq -r '.[] | select(.name=="replayr") | .uuid')
+          if [ -z "$id" ]; then wrangler d1 create replayr >/dev/null; id=$(wrangler d1 list --json | jq -r '.[] | select(.name=="replayr") | .uuid'); fi
+          sed -i "s/PUT-YOUR-D1-DATABASE-ID-HERE/$id/" wrangler.toml
+          wrangler d1 execute replayr --remote --file schema.sql -y
+      - name: Deploy
+        working-directory: server
+        run: wrangler deploy 2>&1 | tee deploy.log
+      - name: Secrets
+        working-directory: server
+        env:
+          ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+        run: |
+          have=$(wrangler secret list 2>/dev/null || echo '[]')
+          if ! echo "$have" | grep -q TOKEN_SECRET; then openssl rand -base64 48 | tr -d '\n' | wrangler secret put TOKEN_SECRET; fi
+          if [ -n "$ADMIN_KEY" ]; then printf '%s' "$ADMIN_KEY" | wrangler secret put ADMIN_KEY; else echo "::warning::No ADMIN_KEY secret: the invite-code page won't work yet."; fi
+      - name: Save the server address
+        run: |
+          url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' server/deploy.log | head -1)
+          echo "### Server is live at $url" >> $GITHUB_STEP_SUMMARY
+          echo "Invite codes: $url/admin" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$url" ] && [ "$(cat server/URL.txt 2>/dev/null)" != "$url" ]; then
+            echo "$url" > server/URL.txt
+            git config user.name "github-actions"; git config user.email "github-actions@users.noreply.github.com"
+            git add server/URL.txt && git commit -m "Server address [skip ci]" && git push
+          fi

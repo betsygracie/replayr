@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 
 namespace cs::ui {
 
@@ -103,6 +104,81 @@ void Avatar(AppContext& ctx, ImDrawList* dl, ImVec2 c, float r, const AccountUse
     dl->AddCircle(c, r, White(0.85f), 40, S(1.5f));
 }
 
+// Sign in / make an account (invite code needed). Opened with ImGui::OpenPopup("##signin").
+struct SignInForm {
+    int mode = 0;   // 0 sign in, 1 make an account
+    char user[32] = {}, pass[128] = {}, pass2[128] = {}, code[32] = {};
+    std::string error;
+    bool submitted = false;
+};
+SignInForm g_form;
+bool g_openSignIn = false;
+
+void OpenSignIn(int mode)
+{
+    g_form.mode = mode;
+    g_form.error.clear();
+    g_form.submitted = false;
+    ImGui::OpenPopup("##signin");
+}
+
+void SignInModal(AppContext& ctx)
+{
+    Account* acc = ctx.account;
+    SignInForm& f = g_form;
+    const AccountState st = acc->State();
+    if (!BeginModal("##signin", "", S(380.0f))) return;
+    if (f.submitted && st == AccountState::SignedIn) {   // done: forget the password and close
+        memset(f.pass, 0, sizeof(f.pass));
+        memset(f.pass2, 0, sizeof(f.pass2));
+        memset(f.code, 0, sizeof(f.code));
+        f.submitted = false;
+        ImGui::CloseCurrentPopup();
+    }
+    const float w = ImGui::GetContentRegionAvail().x;
+    PushFont(GetFonts().semibold, Type::Title);
+    ImGui::TextUnformatted(f.mode == 0 ? "Sign in" : "Make an account");
+    PopFont();
+    Text(f.mode == 0 ? "Use your Replayr username and password." : "You need an invite code to join.", Pal().textDim);
+    Gap(4.0f);
+    static const char* modes[] = { "Sign in", "New account" };
+    if (Segmented("##signmode", &f.mode, modes, 2, w)) f.error.clear();
+    const bool busy = st == AccountState::SigningIn;
+    ImGui::BeginDisabled(busy);
+    const ImGuiInputTextFlags enter = ImGuiInputTextFlags_EnterReturnsTrue;
+    bool go = false;
+    if (f.mode == 1) go |= TextField("##code", f.code, sizeof(f.code), "Invite code (XXXX-XXXX-XXXX)", w, enter | ImGuiInputTextFlags_CharsUppercase, ICON_KEY);
+    go |= TextField("##user", f.user, sizeof(f.user), "Username", w, enter, ICON_PERSON);
+    go |= TextField("##pass", f.pass, sizeof(f.pass), "Password", w, enter | ImGuiInputTextFlags_Password, ICON_LOCK);
+    if (f.mode == 1) go |= TextField("##pass2", f.pass2, sizeof(f.pass2), "Password again", w, enter | ImGuiInputTextFlags_Password, ICON_LOCK);
+    ImGui::EndDisabled();
+    if (!f.error.empty()) Text(f.error.c_str(), Pal().danger);
+    Gap(4.0f);
+    ButtonOpts ok;
+    ok.style = Btn::Primary;
+    ok.size = ImVec2(w * 0.62f, S(40.0f));
+    ok.enabled = !busy && f.user[0] && f.pass[0] && (f.mode == 0 || (f.code[0] && f.pass2[0]));
+    if ((Button(busy ? "Please wait...##go" : (f.mode == 0 ? "Sign in##go" : "Make account##go"), ok) || go) && ok.enabled) {
+        f.error.clear();
+        if (f.mode == 1 && strlen(f.pass) < 8) f.error = "Use a password of at least 8 characters.";
+        else if (f.mode == 1 && strcmp(f.pass, f.pass2) != 0) f.error = "The passwords don't match.";
+        else {
+            f.submitted = true;
+            acc->SignIn(f.user, f.pass, f.mode == 1 ? f.code : "");
+        }
+    }
+    ImGui::SameLine();
+    ButtonOpts cancel;
+    cancel.style = Btn::Ghost;
+    cancel.size = ImVec2(w - w * 0.62f - S(8.0f), S(40.0f));
+    if (Button("Cancel##signcancel", cancel)) {
+        memset(f.pass, 0, sizeof(f.pass));
+        memset(f.pass2, 0, sizeof(f.pass2));
+        ImGui::CloseCurrentPopup();
+    }
+    EndModal();
+}
+
 void AccountMenu(AppContext& ctx)
 {
     if (BeginMenu("##accountmenu")) {
@@ -114,12 +190,17 @@ void AccountMenu(AppContext& ctx)
             MenuSeparator();
             if (MenuItem(ICON_SIGNOUT, "Sign out")) acc->SignOut();
         } else {
-            MenuLabel("Sign in to share clips");
-            if (MenuItem(ICON_PERSON, "Continue with Discord")) acc->SignIn("discord");
-            if (MenuItem(ICON_PERSON, "Continue with Steam")) acc->SignIn("steam");
+            MenuLabel("Replayr account");
+            if (MenuItem(ICON_PERSON, "Sign in")) g_form.mode = 0, g_form.error.clear(), g_openSignIn = true;
+            if (MenuItem(ICON_ADD, "Make an account")) g_form.mode = 1, g_form.error.clear(), g_openSignIn = true;
         }
         EndMenu();
     }
+    if (g_openSignIn) {   // opened outside the menu so the modal isn't a child of it
+        g_openSignIn = false;
+        OpenSignIn(g_form.mode);
+    }
+    SignInModal(ctx);
 }
 
 void AccountCard(AppContext& ctx, ImDrawList* dl, ImVec2 a, ImVec2 b, float pad, bool collapsed)
@@ -182,7 +263,7 @@ void AccountCard(AppContext& ctx, ImDrawList* dl, ImVec2 a, ImVec2 b, float pad,
         dl->AddText(ImVec2(ix + r * 2.0f + S(10.0f), y + S(1.0f)), White(1.0f), name.c_str());
         PopFont();
         PushFont(GetFonts().regular, Type::Caption);
-        dl->AddText(ImVec2(ix + r * 2.0f + S(10.0f), y + S(20.0f)), White(0.8f), u.provider == "steam" ? "Steam" : "Discord");
+        dl->AddText(ImVec2(ix + r * 2.0f + S(10.0f), y + S(20.0f)), White(0.8f), u.cloudClips ? "Replayr account" : "Signed in");
         PopFont();
         Icon(dl, ICON_CHEVRON_DOWN, ImVec2(ix + iw - S(6.0f), y + r), S(11.0f), White(0.8f));
         y += r * 2.0f + S(16.0f);
@@ -194,44 +275,37 @@ void AccountCard(AppContext& ctx, ImDrawList* dl, ImVec2 a, ImVec2 b, float pad,
             snprintf(line, sizeof(line), ups.size() > 1 ? "Uploading %d%% (%d more)" : "Uploading %d%%", (int)(up.progress * 100.0f), (int)ups.size() - 1);
             frac = up.progress;
         } else {
-            snprintf(line, sizeof(line), "%s of %s in the cloud", FormatBytes(u.usedBytes).c_str(), FormatBytes(u.quotaBytes).c_str());
-            frac = u.quotaBytes ? (float)((double)u.usedBytes / (double)u.quotaBytes) : 0.0f;
+            if (u.cloudClips) {
+                snprintf(line, sizeof(line), "%s of %s in the cloud", FormatBytes(u.usedBytes).c_str(), FormatBytes(u.quotaBytes).c_str());
+                frac = u.quotaBytes ? (float)((double)u.usedBytes / (double)u.quotaBytes) : 0.0f;
+            } else {
+                snprintf(line, sizeof(line), "Cloud clips are off");
+                frac = 0.0f;
+            }
         }
         ProgressBar(dl, ImVec2(ix, y), ImVec2(ix + iw, y + S(6.0f)), frac, true);
         PushFont(GetFonts().regular, Type::Caption);
         dl->AddText(ImVec2(ix, y + S(13.0f)), White(0.9f), line);
         PopFont();
-    } else if (st == AccountState::SigningIn) {
-        PushFont(GetFonts().semibold, Type::Heading);
-        dl->AddText(ImVec2(ix, y), White(1.0f), "Check your browser");
-        PopFont();
-        PushFont(GetFonts().regular, Type::Caption);
-        dl->AddText(ImVec2(ix, y + S(28.0f)), White(0.85f), "Finish signing in there.");
-        PopFont();
-        Spinner(dl, ImVec2(ix + iw - S(10.0f), y + S(12.0f)), S(8.0f), White(1.0f));
-        ImGui::SetCursorScreenPos(ImVec2(ix, y + S(58.0f)));
-        ButtonOpts cancel;
-        cancel.style = Btn::Ghost;
-        cancel.size = ImVec2(iw, S(34.0f));
-        if (Button("Cancel##signin", cancel)) acc->CancelSignIn();
     } else {
         PushFont(GetFonts().semibold, Type::Heading);
-        dl->AddText(ImVec2(ix, y), White(1.0f), "Share your clips");
+        dl->AddText(ImVec2(ix, y), White(1.0f), st == AccountState::SigningIn ? "Signing in..." : "Your account");
         PopFont();
         PushFont(GetFonts().regular, Type::Caption);
-        dl->AddText(ImVec2(ix, y + S(28.0f)), White(0.85f), "Sign in to upload and get links.");
+        dl->AddText(ImVec2(ix, y + S(28.0f)), White(0.85f), "Invite only. No email needed.");
         PopFont();
+        if (st == AccountState::SigningIn) Spinner(dl, ImVec2(ix + iw - S(10.0f), y + S(12.0f)), S(8.0f), White(1.0f));
         const float bw = (iw - S(8.0f)) * 0.5f, bh = S(34.0f);
         ImGui::SetCursorScreenPos(ImVec2(ix, y + S(56.0f)));
         ButtonOpts d;
         d.style = Btn::Secondary;
         d.size = ImVec2(bw, bh);
-        d.tooltip = "Sign in with your Discord account (opens your browser)";
-        if (Button("Discord", d)) acc->SignIn("discord");
+        d.tooltip = "Sign in with your Replayr username and password";
+        if (Button("Sign in", d)) OpenSignIn(0);
         ImGui::SetCursorScreenPos(ImVec2(ix + bw + S(8.0f), y + S(56.0f)));
-        ButtonOpts st2 = d;
-        st2.tooltip = "Sign in with your Steam account (opens your browser)";
-        if (Button("Steam", st2)) acc->SignIn("steam");
+        ButtonOpts j = d;
+        j.tooltip = "Make an account with an invite code";
+        if (Button("Join", j)) OpenSignIn(1);
     }
     const float bh = S(42.0f);
     SaveClipButton(ctx, dl, ImVec2(ix, cb.y - bh - S(16.0f)), iw, bh);
@@ -277,7 +351,7 @@ void DrawSidebar(AppContext& ctx, float width, float height)
     };
     std::vector<Item> items = { { ICON_VIDEO, "Clips", Page::Clips }, { ICON_CAMERA, "Screenshots", Page::Screenshots } };
     if (ui.editor.hasClip) items.push_back({ ICON_TRIM, "Editor", Page::Editor });
-    if (ctx.account && ctx.account->State() == AccountState::SignedIn) items.push_back({ ICON_CLOUD, "Uploads", Page::Uploads });
+    if (ctx.account && ctx.account->State() == AccountState::SignedIn && ctx.account->User().cloudClips) items.push_back({ ICON_CLOUD, "Uploads", Page::Uploads });
     items.push_back({ ICON_SETTINGS, "Settings", Page::Settings });
 
     const float itemH = S(Tok::NavItemHeight + 4.0f), step = itemH + S(4.0f);

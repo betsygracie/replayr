@@ -1,10 +1,8 @@
 #pragma once
-// Sign in with Discord or Steam (through the Replayr server), keep the session in Windows
-// Credential Manager, and upload clips in the background.
-//
-// Sign-in uses the system browser with PKCE and a one-shot listener on 127.0.0.1:<random port>,
-// so the app never sees a Discord or Steam password. All network work runs on one worker thread;
-// the UI reads snapshots and polls events.
+// Invite-only Replayr accounts: username + password (no emails); making an account needs an invite
+// code from the owner. The session (refresh token) is kept in Windows Credential Manager; the
+// password is never stored. All network work runs on one worker thread; the UI reads snapshots
+// and polls events.
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -17,6 +15,7 @@ enum class AccountState { Off, SignedOut, SigningIn, SignedIn };
 struct AccountUser {
     std::string id, name, provider, avatarUrl;
     uint64_t usedBytes = 0, quotaBytes = 0;
+    bool cloudClips = false;   // the server has clip storage turned on
 };
 
 struct CloudClip {
@@ -53,7 +52,8 @@ public:
     AccountUser User() const;
     std::wstring AvatarPath() const;        // downloaded avatar image ("" until it's there)
 
-    void SignIn(const std::string& provider);   // "discord" / "steam": opens the browser
+    // Empty inviteCode: sign in. With a code: make the account, then sign in.
+    void SignIn(const std::string& username, const std::string& password, const std::string& inviteCode = "");
     void CancelSignIn();
     void SignOut();
 

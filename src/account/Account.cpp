@@ -259,6 +259,7 @@ struct Account::Impl {
         nu.name = u.value("name", "");
         nu.provider = u.value("provider", "");
         if (u.contains("avatar") && u["avatar"].is_string()) nu.avatarUrl = u["avatar"].get<std::string>();
+        nu.cloudClips = u.contains("storage") && u["storage"].is_boolean() && u["storage"].get<bool>();
         nu.usedBytes = u.value("usedBytes", (uint64_t)0);
         nu.quotaBytes = u.value("quotaBytes", (uint64_t)0);
         bool newAvatar;
@@ -343,93 +344,23 @@ struct Account::Impl {
 
     // ---- sign-in -------------------------------------------------------------------------------
 
-    void SignInFlow(std::string provider)
+    // Username + password; with an invite code it makes the account first. Runs on the worker thread.
+    void SignInFlow(const std::string& username, const std::string& password, const std::string& code)
     {
-        WSADATA wsa;
-        WSAStartup(MAKEWORD(2, 2), &wsa);
-        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = 0;   // any free port
-        int alen = sizeof(addr);
-        if (s == INVALID_SOCKET || bind(s, (sockaddr*)&addr, sizeof(addr)) != 0 || listen(s, 4) != 0 || getsockname(s, (sockaddr*)&addr, &alen) != 0) {
-            if (s != INVALID_SOCKET) closesocket(s);
-            Fail("Couldn't start sign-in (no local port).");
+        nlohmann::json b;
+        b["username"] = username;
+        b["password"] = password;
+        b["device"] = ComputerName();
+        if (!code.empty()) b["code"] = code;
+        HttpResult r = Request(L"POST", Server(code.empty() ? "/auth/login" : "/auth/register"), b.dump(), false);
+        auto j = nlohmann::json::parse(r.body, nullptr, false);
+        if (r.status != 200 || j.is_discarded()) {
+            Fail(ErrorOf(r, code.empty() ? "Couldn't sign in." : "Couldn't make the account."));
             return;
         }
-        const int port = ntohs(addr.sin_port);
-        const std::string verifier = RandomToken(32), challenge = Sha256B64Url(verifier), appState = RandomToken(24);
-        char q[256];
-        snprintf(q, sizeof(q), "/auth/%s/start?port=%d&state=%s&challenge=%s", provider.c_str(), port, appState.c_str(), challenge.c_str());
-        ShellExecuteW(nullptr, L"open", Server(q).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-
-        std::string code;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
-        while (!quit && !cancelSignIn && std::chrono::steady_clock::now() < deadline && code.empty()) {
-            fd_set set;
-            FD_ZERO(&set);
-            FD_SET(s, &set);
-            timeval tv{ 0, 250000 };
-            if (select(0, &set, nullptr, nullptr, &tv) <= 0) continue;
-            SOCKET client = accept(s, nullptr, nullptr);
-            if (client == INVALID_SOCKET) continue;
-            char buf[8192];
-            const int n = recv(client, buf, sizeof(buf) - 1, 0);
-            std::string req = n > 0 ? std::string(buf, (size_t)n) : "";
-            std::string line = req.substr(0, req.find("\r\n"));
-            std::string reply;
-            if (line.rfind("GET /callback?", 0) == 0) {
-                const std::string target = line.substr(4, line.find(' ', 4) - 4);
-                const std::string query = target.substr(target.find('?') + 1);
-                const bool ok = QueryParam(query, "state") == appState && !QueryParam(query, "code").empty();
-                if (ok) code = QueryParam(query, "code");
-                const char* title = ok ? "You're signed in" : "Sign-in didn't match";
-                const char* text = ok ? "You can close this tab and go back to Replayr." : "Go back to Replayr and try again.";
-                char page[1400];
-                snprintf(page, sizeof(page),
-                         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>%s</title><style>body{margin:0;height:100vh;display:flex;"
-                         "align-items:center;justify-content:center;font-family:system-ui,sans-serif;color:#fff;background:radial-gradient(circle at 25%% 25%%,"
-                         "#5b2bd6 0,transparent 45%%),#0b0614}div{padding:32px 40px;border-radius:18px;background:rgba(255,255,255,.08);border:1px solid "
-                         "rgba(255,255,255,.18);text-align:center}p{color:rgba(255,255,255,.65)}</style></head><body><div><h1>%s</h1><p>%s</p></div>"
-                         "</body></html>",
-                         title, title, text);
-                reply = std::string("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nContent-Length: ") +
-                        std::to_string(strlen(page)) + "\r\n\r\n" + page;
-            } else {
-                reply = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            }
-            send(client, reply.data(), (int)reply.size(), 0);
-            shutdown(client, SD_SEND);
-            closesocket(client);
-        }
-        closesocket(s);
-        WSACleanup();
-        if (code.empty()) {
-            if (cancelSignIn) {
-                std::lock_guard<std::mutex> lock(m);
-                state = AccountState::SignedOut;
-            } else {
-                Fail("Sign-in timed out. Try again.");
-            }
-            return;
-        }
-        // Swap the code for tokens on the worker thread (it owns the tokens).
-        Post([this, code, verifier] {
-            nlohmann::json b;
-            b["code"] = code;
-            b["verifier"] = verifier;
-            b["device"] = ComputerName();
-            HttpResult r = Request(L"POST", Server("/auth/token"), b.dump(), false);
-            auto j = nlohmann::json::parse(r.body, nullptr, false);
-            if (r.status != 200 || j.is_discarded()) {
-                Fail(ErrorOf(r, "Couldn't finish signing in."));
-                return;
-            }
-            TakeTokens(j);
-            Emit(AccountEventType::SignedIn, "Signed in as " + user.name);
-            LoadClips();
-        });
+        TakeTokens(j);
+        Emit(AccountEventType::SignedIn, (code.empty() ? "Signed in as " : "Welcome to Replayr, ") + user.name);
+        LoadClips();
     }
 
     void Fail(const std::string& msg)
@@ -576,7 +507,7 @@ std::wstring Account::AvatarPath() const
     return d_->avatarPath;
 }
 
-void Account::SignIn(const std::string& provider)
+void Account::SignIn(const std::string& username, const std::string& password, const std::string& inviteCode)
 {
     if (!Enabled()) return;
     {
@@ -584,9 +515,7 @@ void Account::SignIn(const std::string& provider)
         if (d_->state == AccountState::SigningIn) return;
         d_->state = AccountState::SigningIn;
     }
-    if (d_->signInThread.joinable()) d_->signInThread.join();
-    d_->cancelSignIn = false;
-    d_->signInThread = std::thread([this, provider] { d_->SignInFlow(provider); });
+    d_->Post([this, username, password, inviteCode] { d_->SignInFlow(username, password, inviteCode); });
 }
 
 void Account::CancelSignIn() { d_->cancelSignIn = true; }
