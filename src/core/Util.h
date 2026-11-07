@@ -13,6 +13,8 @@ std::wstring AppDataDir();        // %APPDATA%\Replayr (created on demand)
 std::wstring LocalDataDir();      // %LOCALAPPDATA%\Replayr (created on demand)
 std::string TimeOfDayText();      // local time, "21:14"
 std::wstring SuggestionsDir();
+std::string ReadTextFile(const std::wstring& path);                          // "" if missing
+bool WriteTextFile(const std::wstring& path, const std::string& text);       // via a temp file, replaced atomically
 std::vector<std::wstring> ListFiles(const std::wstring& dir, const wchar_t* pattern);   // full paths, not recursive    // %LOCALAPPDATA%\Replayr\Suggestions (suggested highlight clips)
 std::wstring DefaultClipsDir();   // %USERPROFILE%\Videos\Replayr
 std::wstring ExeDir();

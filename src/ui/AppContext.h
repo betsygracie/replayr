@@ -23,6 +23,8 @@ class Hotkeys;
 class Thumbnailer;
 class MediaPlayer;
 class ClipAudio;
+class GameDetector;
+class GameProfiles;
 class Filmstrips;
 class ImageCache;
 } // namespace cs
@@ -180,8 +182,11 @@ struct SettingsState {
     double savedAt = -100.0;        // "Saved" flash
     bool advanced[5] = {};
     double bannerPreviewAt = -100.0;
+    std::string gameProfile;        // Games page: the profile being edited ("" = the list)
+    char gameSearch[64] = {};
 };
 constexpr int kPushToTalkSlot = 100;
+constexpr int kProfileKeySlot = 200;   // 200 save clip, 201 bookmark, 202 screenshot (the edited game's profile)
 
 struct Snackbar {
     std::string text;
@@ -228,6 +233,9 @@ struct AppContext {
     Updater* updater = nullptr;
     Account* account = nullptr;
     InputOverlay* inputOverlay = nullptr;     // null when accounts are off (CS_ACCOUNT_SERVER empty)
+    GameDetector* games = nullptr;
+    GameProfiles* profiles = nullptr;
+    std::string activeGame;                   // id of the game being played (profile applied), "" if none
 
     void Do(Action a) { ui.actions.push_back(a); }
     void Changed() { ui.settingsDirty = true; }
@@ -237,6 +245,7 @@ struct AppContext {
     void ChangedHotkeys() { ui.settingsDirty = ui.hotkeysDirty = true; }
     void ChangedStorage() { ui.settingsDirty = ui.storageDirty = ui.engineDirty = true; }
     void ChangedStartup() { ui.settingsDirty = ui.startupDirty = true; }
+    void ChangedProfile() { ui.engineDirty = ui.hotkeysDirty = true; }   // a game profile changed: re-apply it
 };
 
 // ---- views (one file each) ----------------------------------------------------------------

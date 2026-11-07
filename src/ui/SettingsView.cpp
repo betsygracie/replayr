@@ -13,6 +13,11 @@
 #include "engine/Encoder.h"
 #include "AppInfo.h"
 #include "core/InputOverlay.h"
+#include "core/GameDetector.h"
+#include "core/GameProfiles.h"
+#include "core/Platform.h"
+#include "media/MediaCache.h"
+#include <ctime>
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +25,8 @@
 #include <cfloat>
 #include <cstring>
 #include <vector>
+#include <functional>
+#include <optional>
 
 namespace cs::ui {
 
@@ -33,7 +40,7 @@ struct Category {
     const char* name;
 };
 const Category kCategories[] = {
-    { ICON_GENERAL, "General" }, { ICON_RECORDING, "Recording" }, { ICON_AUDIO, "Audio" }, { ICON_KEYBOARD, "Hotkeys" }, { ICON_FOLDER, "Storage" }, { ICON_STAR, "Highlights" },
+    { ICON_GENERAL, "General" }, { ICON_RECORDING, "Recording" }, { ICON_AUDIO, "Audio" }, { ICON_KEYBOARD, "Hotkeys" }, { ICON_FOLDER, "Storage" }, { ICON_STAR, "Highlights" }, { ICON_GAME, "Games" },
 };
 constexpr int kCategoryCount = (int)(sizeof(kCategories) / sizeof(kCategories[0]));
 
@@ -719,6 +726,382 @@ void Recording(AppContext& ctx)
 
 void MicCleanup(AppContext& ctx);
 
+// ---- Games: detected games, Auto-record, and per-game profiles ------------------------------
+
+void GameIcon(AppContext& ctx, ImDrawList* dl, ImVec2 pos, float size, const std::wstring& icon, const std::string& name)
+{
+    if (icon.size() > 2) {
+        const ImageInfo img = ctx.images.Get(icon);
+        if (img.texture && !img.failed) {
+            dl->AddImageRounded((ImTextureID)img.texture, pos, ImVec2(pos.x + size, pos.y + size), ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, S(6.0f));
+            return;
+        }
+    }
+    GameAvatar(dl, pos, size, name);
+}
+
+void SaveProfile(AppContext& ctx, const GameProfile& p)
+{
+    ctx.profiles->Save(p);
+    if (p.id == ctx.activeGame) ctx.ChangedProfile();   // it's running: apply right away
+}
+
+// A setting row that's either "Using default" or changed for this game, with a reset button.
+// Draws the label column; returns true when the caller should draw its control (always).
+template <class T>
+void OverrideRow(AppContext& ctx, GameProfile& p, const char* title, std::optional<T>& o, const std::function<bool(T&)>& control, const T& def,
+                 const char* defText)
+{
+    char desc[160];
+    if (o) snprintf(desc, sizeof(desc), "Changed for this game (default: %s)", defText);
+    else snprintf(desc, sizeof(desc), "Using default");
+    Row(title, desc);
+    T v = o ? *o : def;
+    const float rw = S(30.0f);
+    Right(CW() + rw + S(6.0f));
+    ImGui::BeginGroup();
+    ImGui::PushID(title);
+    if (o) {
+        ButtonOpts rb;
+        rb.style = Btn::Ghost;
+        rb.icon = ICON_UNDO;
+        rb.size = ImVec2(rw, S(Tok::ControlHeight));
+        rb.tooltip = "Reset to default";
+        if (Button("##reset", rb)) {
+            o.reset();
+            SaveProfile(ctx, p);
+        }
+    } else {
+        ImGui::Dummy(ImVec2(rw, S(Tok::ControlHeight)));
+    }
+    ImGui::SameLine(0, S(6.0f));
+    if (control(v)) {
+        o = v;
+        SaveProfile(ctx, p);
+    }
+    ImGui::PopID();
+    ImGui::EndGroup();
+    RowEnd();
+}
+
+void ProfilePage(AppContext& ctx, const std::string& id)
+{
+    Settings& s = ctx.settings;
+    std::vector<GameInfo> all = ctx.games->Games();
+    GameInfo info;
+    for (const GameInfo& g : all)
+        if (g.id == id) info = g;
+    GameProfile& p = ctx.profiles->Get(id, info.name.empty() ? id : info.name);
+    if (p.name.empty()) p.name = info.name;
+
+    ButtonOpts back;
+    back.style = Btn::Ghost;
+    back.icon = ICON_CHEVRON_LEFT;
+    if (Button("All games", back)) {
+        ctx.ui.settings.gameProfile.clear();
+        return;
+    }
+    Gap(8.0f);
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 hp = ImGui::GetCursorScreenPos();
+        GameIcon(ctx, dl, hp, S(48.0f), info.icon, p.name);
+        ImGui::SetCursorScreenPos(ImVec2(hp.x + S(62.0f), hp.y + S(2.0f)));
+        PushFont(GetFonts().semibold, Type::Title);
+        ImGui::TextUnformatted(p.name.c_str());
+        PopFont();
+        ImGui::SetCursorScreenPos(ImVec2(hp.x + S(62.0f), hp.y + S(30.0f)));
+        const std::string sub = (info.launcher.empty() ? p.launcher : info.launcher) + (id == ctx.activeGame ? "  \xC2\xB7  playing now" : "");
+        Text(sub.c_str(), Pal().textDim, GetFonts().regular, Type::Caption);
+        ImGui::SetCursorScreenPos(ImVec2(hp.x, hp.y + S(60.0f)));
+    }
+    TextWrapped("Anything you change here only applies while this game is running. Everything else follows your main settings.",
+                Pal().textFaint, ImGui::GetContentRegionAvail().x, GetFonts().regular, Type::Caption);
+    Gap(8.0f);
+
+    Group("When it launches");
+    if (BeginRows("##pauto")) {
+        Row("Auto-record", "Starts the replay buffer when the game launches and stops it when the game closes.");
+        Right(S(40.0f));
+        if (Toggle("##pautorec", &p.autoRecord)) SaveProfile(ctx, p);
+        RowEnd();
+    }
+    EndRows();
+
+    static const char* resNames[] = { "Native", "2160p", "1440p", "1080p", "720p" };
+    static const char* fpsNames[] = { "30", "60", "120", "144" };
+    static const int fpsValues[] = { 30, 60, 120, 144 };
+    static const char* qualNames[] = { "Performance", "Balanced", "Quality" };
+    static const char* srcNames[] = { "Game only", "Whole screen", "Both" };
+    static const char* sensNames[] = { "Low", "Medium", "High" };
+    auto srcIndex = [](const std::string& src) { return src == "game" ? 0 : (src.rfind("both:", 0) == 0 ? 2 : 1); };
+    char tmp[64];
+
+    Group("Video");
+    if (BeginRows("##pvideo")) {
+        snprintf(tmp, sizeof(tmp), "%s", FormatDuration(s.replay.seconds).c_str());
+        OverrideRow<int>(ctx, p, "Clip length", p.replaySeconds, [&](int& v) {
+            char t[32];
+            snprintf(t, sizeof(t), "%s", FormatDuration(v).c_str());
+            return SliderInt("##plen", &v, 15, 600, t, 15, CW());
+        }, s.replay.seconds, tmp);
+        OverrideRow<int>(ctx, p, "Resolution", p.resolution, [&](int& v) { return Dropdown("##pres", &v, resNames, 5, CW()); }, s.video.resolution,
+                         resNames[Clamp(s.video.resolution, 0, 4)]);
+        snprintf(tmp, sizeof(tmp), "%d fps", s.video.fps);
+        OverrideRow<int>(ctx, p, "Frame rate", p.fps, [&](int& v) {
+            int fi = 1;
+            for (int i = 0; i < 4; ++i)
+                if (v == fpsValues[i]) fi = i;
+            if (!Segmented("##pfps", &fi, fpsNames, 4, CW())) return false;
+            v = fpsValues[fi];
+            return true;
+        }, s.video.fps, tmp);
+        snprintf(tmp, sizeof(tmp), "%d Mbit/s", s.video.bitrateMbps);
+        OverrideRow<int>(ctx, p, "Bitrate", p.bitrateMbps, [&](int& v) {
+            char t[32];
+            snprintf(t, sizeof(t), "%d Mbit/s", v);
+            return SliderInt("##pbit", &v, 5, 150, t, 5, CW());
+        }, s.video.bitrateMbps, tmp);
+        OverrideRow<int>(ctx, p, "Encoder preset", p.quality, [&](int& v) { return Segmented("##pq", &v, qualNames, 3, CW()); }, s.video.quality,
+                         qualNames[Clamp(s.video.quality, 0, 2)]);
+        OverrideRow<std::string>(ctx, p, "Capture source", p.source, [&](std::string& v) {
+            int m = srcIndex(v);
+            if (!Segmented("##psrc", &m, srcNames, 3, CW())) return false;
+            v = m == 0 ? "game" : (m == 1 ? "monitor:0" : "both:0");
+            return true;
+        }, s.video.source, srcNames[srcIndex(s.video.source)]);
+    }
+    EndRows();
+
+    Group("Audio");
+    if (BeginRows("##paudio")) {
+        auto toggle = [&](const char* title, std::optional<bool>& o, bool def) {
+            OverrideRow<bool>(ctx, p, title, o, [&](bool& v) {
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + CW() - S(40.0f));
+                return Toggle("##t", &v);
+            }, def, def ? "on" : "off");
+        };
+        toggle("Game audio", p.captureSystem, s.audio.captureSystem);
+        toggle("Microphone", p.captureMic, s.audio.captureMic);
+        toggle("Noise suppression", p.noiseSuppression, s.audio.noiseSuppression);
+        toggle("Separate tracks", p.separateTracks, s.audio.separateTracks);
+    }
+    EndRows();
+
+    Group("Highlights");
+    if (BeginRows("##phl")) {
+        OverrideRow<bool>(ctx, p, "Find highlights", p.highlights, [&](bool& v) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + CW() - S(40.0f));
+            return Toggle("##t", &v);
+        }, s.highlights.enabled, s.highlights.enabled ? "on" : "off");
+        OverrideRow<int>(ctx, p, "Sensitivity", p.highlightSensitivity, [&](int& v) { return Segmented("##psens", &v, sensNames, 3, CW()); },
+                         s.highlights.sensitivity, sensNames[Clamp(s.highlights.sensitivity, 0, 2)]);
+    }
+    EndRows();
+
+    Group("Hotkeys (so they don't clash with this game's own keys)");
+    if (BeginRows("##pkeys")) {
+        struct K {
+            const char* title;
+            std::optional<Hotkey>* o;
+            HotkeyAction a;
+        };
+        const K keys[] = { { "Save clip", &p.saveKey, HotkeyAction::SaveReplay }, { "Bookmark", &p.bookmarkKey, HotkeyAction::Bookmark },
+                           { "Screenshot", &p.screenshotKey, HotkeyAction::Screenshot } };
+        for (int i = 0; i < 3; ++i) {
+            const Hotkey def = s.hotkeys[(size_t)keys[i].a];
+            char desc[96];
+            if (*keys[i].o) snprintf(desc, sizeof(desc), "Changed for this game (default: %s)", Hotkeys::ToString(def).c_str());
+            else snprintf(desc, sizeof(desc), "Using default");
+            Row(keys[i].title, desc);
+            const float rw = S(30.0f);
+            Right(CW() + rw + S(6.0f));
+            ImGui::PushID(i);
+            if (*keys[i].o) {
+                ButtonOpts rb;
+                rb.style = Btn::Ghost;
+                rb.icon = ICON_UNDO;
+                rb.size = ImVec2(rw, S(Tok::ControlHeight));
+                rb.tooltip = "Reset to default";
+                if (Button("##rk", rb)) {
+                    keys[i].o->reset();
+                    SaveProfile(ctx, p);
+                }
+            } else {
+                ImGui::Dummy(ImVec2(rw, S(Tok::ControlHeight)));
+            }
+            ImGui::SameLine(0, S(6.0f));
+            const bool capturing = ctx.ui.settings.capturing == kProfileKeySlot + i;
+            const Hotkey shown = *keys[i].o ? **keys[i].o : def;
+            if (HotkeyBinder("##pk", Hotkeys::ToString(shown), capturing ? BinderState::Capturing : BinderState::Normal, CW())) {
+                ctx.ui.settings.capturing = kProfileKeySlot + i;
+                ctx.Do(Action::StartKeyCapture);
+            }
+            ImGui::PopID();
+            RowEnd();
+        }
+    }
+    EndRows();
+
+    Group("Saving");
+    if (BeginRows("##psave")) {
+        static char folder[128];
+        static std::string folderFor;
+        if (folderFor != id) {
+            folderFor = id;
+            snprintf(folder, sizeof(folder), "%s", p.folder ? ToUtf8(*p.folder).c_str() : "");
+        }
+        Row("Folder name", p.folder ? "Clips from this game go in this folder inside your clips folder." : "Using default (the game's name)");
+        Right(CW());
+        if (TextField("##pfolder", folder, sizeof(folder), p.name.c_str(), CW(), 0, ICON_FOLDER)) {
+            if (folder[0]) p.folder = SanitizeFileName(ToWide(folder));
+            else p.folder.reset();
+            SaveProfile(ctx, p);
+        }
+        RowEnd();
+    }
+    EndRows();
+
+    if (p.manual) {
+        ButtonOpts rm;
+        rm.style = Btn::Ghost;
+        rm.icon = ICON_DELETE;
+        if (Button("Remove this game", rm)) {
+            ctx.profiles->Remove(id);
+            ctx.games->SetManual(ctx.profiles->ManualGames());
+            ctx.ui.settings.gameProfile.clear();
+        }
+    }
+}
+
+void GamesPage(AppContext& ctx)
+{
+    if (!ctx.games || !ctx.profiles) return;
+    SettingsState& st = ctx.ui.settings;
+    if (!st.gameProfile.empty()) {
+        ProfilePage(ctx, st.gameProfile);
+        return;
+    }
+    const float W = ImGui::GetContentRegionAvail().x;
+    // Search, add, rescan.
+    const float bw = S(130.0f);
+    TextField("##gsearch", st.gameSearch, sizeof(st.gameSearch), "Search games", W - bw * 2.0f - S(16.0f), 0, ICON_SEARCH);
+    ImGui::SameLine(0, S(8.0f));
+    ButtonOpts add;
+    add.style = Btn::Primary;
+    add.icon = ICON_ADD;
+    add.size = ImVec2(bw, S(Tok::ControlHeight));
+    add.tooltip = "Pick a game's .exe that Replayr didn't find";
+    if (Button("Add game", add)) {
+        std::wstring exe;
+        if (platform::PickFile(ctx.window.Hwnd(), exe, L"Games (*.exe)", L"*.exe") && !exe.empty()) {
+            const std::string name = GameDetector::NameFromExe(exe);
+            std::string gid;
+            for (wchar_t c : FileStem(exe) + L".exe") gid += (char)std::tolower((int)(c < 128 ? c : '_'));
+            GameProfile& p = ctx.profiles->Get("manual:" + gid, name);
+            p.manual = true;
+            p.exe = exe;
+            p.installDir = ParentDir(exe);
+            p.launcher = "Added by you";
+            ctx.profiles->Save(p);
+            ctx.games->SetManual(ctx.profiles->ManualGames());
+            st.gameProfile = p.id;
+            return;
+        }
+    }
+    ImGui::SameLine(0, S(8.0f));
+    ButtonOpts rs;
+    rs.icon = ICON_REFRESH;
+    rs.size = ImVec2(bw, S(Tok::ControlHeight));
+    rs.tooltip = "Look through Steam, Epic, Battle.net, EA and Ubisoft again";
+    if (Button(ctx.games->Scanning() ? "Scanning\xE2\x80\xA6" : "Rescan", rs)) ctx.games->Rescan();
+    Gap(10.0f);
+    TextWrapped("Replayr notices when one of these starts. Turn on Auto-record to start the replay buffer with it, or open a game to give it "
+                "its own settings. It only looks at which programs are running, never inside a game, so anti-cheat has nothing to flag.",
+                Pal().textFaint, W, GetFonts().regular, Type::Caption);
+    Gap(10.0f);
+
+    const std::vector<GameInfo> games = ctx.games->Games();
+    const std::string q = ToLowerAscii(st.gameSearch);
+    auto rowFor = [&](const GameInfo& g, const char* idPrefix) {
+        GameProfile* p = const_cast<GameProfile*>(ctx.profiles->Find(g.id));
+        ImGui::PushID(idPrefix);
+        ImGui::PushID(g.id.c_str());
+        const ImVec2 a = ImGui::GetCursorScreenPos();
+        const float h = S(58.0f);
+        const ImVec2 b(a.x + W, a.y + h);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        // The toggle and the row are separate hit areas: the toggle goes first so it gets its clicks.
+        const float tx = b.x - S(40.0f) - S(52.0f);
+        ImGui::SetCursorScreenPos(ImVec2(tx, a.y + (h - S(22.0f)) * 0.5f));
+        bool ar = p && p->autoRecord;
+        if (Toggle("##ar", &ar)) {
+            GameProfile& np = ctx.profiles->Get(g.id, g.name);
+            np.name = g.name;
+            np.launcher = g.launcher;
+            np.autoRecord = ar;
+            SaveProfile(ctx, np);
+        }
+        Tooltip("Auto-record: start the replay buffer when this game launches");
+        ImGui::SetCursorScreenPos(a);
+        const bool open = ImGui::InvisibleButton("##row", ImVec2(tx - a.x - S(8.0f), h));
+        const bool hv = ImGui::IsItemHovered();
+        if (hv) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        dl->AddRectFilled(a, b, White(hv ? 0.09f : 0.05f), S(12.0f));
+        dl->AddRect(a, b, White(0.10f), S(12.0f));
+        GameIcon(ctx, dl, ImVec2(a.x + S(12.0f), a.y + S(11.0f)), S(36.0f), g.icon, g.name);
+        PushFont(GetFonts().semibold, Type::Body);
+        dl->AddText(ImVec2(a.x + S(60.0f), a.y + S(11.0f)), Pal().text, g.name.c_str());
+        PopFont();
+        std::string sub = g.launcher;
+        if (g.id == ctx.activeGame) sub += "  \xC2\xB7  playing now";
+        else if (p && p->lastPlayed) sub += "  \xC2\xB7  " + RelativeTime(p->lastPlayed);
+        if (p && p->OverrideCount()) sub += "  \xC2\xB7  " + std::to_string(p->OverrideCount()) + (p->OverrideCount() == 1 ? " change" : " changes");
+        PushFont(GetFonts().regular, Type::Caption);
+        dl->AddText(ImVec2(a.x + S(60.0f), a.y + S(33.0f)), g.id == ctx.activeGame ? Pal().success : Pal().textDim, sub.c_str());
+        PopFont();
+        Icon(dl, ICON_CHEVRON_RIGHT, ImVec2(b.x - S(24.0f), a.y + h * 0.5f), S(12.0f), White(0.6f));
+        if (open) st.gameProfile = g.id;
+        ImGui::SetCursorScreenPos(ImVec2(a.x, b.y + S(8.0f)));
+        ImGui::Dummy(ImVec2(0, 0));
+        ImGui::PopID();
+        ImGui::PopID();
+    };
+
+    // Recently played (with a profile that has a last-played time).
+    if (q.empty()) {
+        std::vector<std::pair<int64_t, GameInfo>> recent;
+        for (const GameProfile& p : ctx.profiles->All()) {
+            if (!p.lastPlayed) continue;
+            GameInfo g;
+            g.id = p.id;
+            g.name = p.name;
+            g.launcher = p.launcher;
+            for (const GameInfo& x : games)
+                if (x.id == p.id) g = x;
+            recent.push_back({ p.lastPlayed, g });
+        }
+        std::sort(recent.begin(), recent.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        if (!recent.empty()) {
+            Group("Recently played");
+            for (size_t i = 0; i < recent.size() && i < 4; ++i) rowFor(recent[i].second, "recent");
+            Gap(8.0f);
+        }
+    }
+    char head[64];
+    snprintf(head, sizeof(head), "All games (%d)", (int)games.size());
+    Group(head);
+    if (games.empty())
+        TextWrapped(ctx.games->Scanning() ? "Looking for installed games\xE2\x80\xA6" : "No games found. Use Add game to pick one yourself.",
+                    Pal().textDim, W, GetFonts().regular, Type::Body);
+    for (const GameInfo& g : games) {
+        if (!q.empty() && ToLowerAscii(g.name).find(q) == std::string::npos) continue;
+        rowFor(g, "all");
+    }
+}
+
+void HighlightsPage(AppContext& ctx);
+
 // Auto-highlights: loud moments become suggested clips (and pins in the editor).
 void HighlightsPage(AppContext& ctx)
 {
@@ -1087,6 +1470,7 @@ void DrawSettings(AppContext& ctx)
     case 2: Audio(ctx); break;
     case 3: HotkeysPage(ctx); break;
     case 5: HighlightsPage(ctx); break;
+    case 6: GamesPage(ctx); break;
     default: Storage(ctx); break;
     }
     ImGui::EndChild();

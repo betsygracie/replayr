@@ -91,6 +91,8 @@ set(CS_SOURCES
     src/core/Thumbnailer.cpp
     src/core/ClipLibrary.cpp
     src/core/Bookmarks.cpp
+    src/core/GameDetector.cpp
+    src/core/GameProfiles.cpp
     src/core/MediaPlayer.cpp
     src/core/Screenshot.cpp
     src/core/SystemStats.cpp

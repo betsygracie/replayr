@@ -289,4 +289,27 @@ std::vector<std::wstring> ListFiles(const std::wstring& dir, const wchar_t* patt
     return out;
 }
 
+std::string ReadTextFile(const std::wstring& path)
+{
+    std::string out;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    char buf[16384];
+    DWORD n = 0;
+    while (ReadFile(h, buf, sizeof(buf), &n, nullptr) && n > 0 && out.size() < (64u << 20)) out.append(buf, n);
+    CloseHandle(h);
+    return out;
+}
+
+bool WriteTextFile(const std::wstring& path, const std::string& text)
+{
+    const std::wstring tmp = path + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD n = 0;
+    const bool ok = WriteFile(h, text.data(), (DWORD)text.size(), &n, nullptr) && n == text.size();
+    CloseHandle(h);
+    return ok && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
 } // namespace cs

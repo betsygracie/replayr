@@ -15,6 +15,8 @@
 #include "core/Thumbnailer.h"
 #include "core/Toast.h"
 #include "core/Bookmarks.h"
+#include "core/GameDetector.h"
+#include "core/GameProfiles.h"
 #include "core/Tray.h"
 #include "core/Util.h"
 #include "core/Window.h"
@@ -30,6 +32,7 @@
 #include "imgui_impl_win32.h"
 
 #include <algorithm>
+#include <ctime>
 #include <cmath>
 #include <climits>
 #include <cstdio>
@@ -59,6 +62,13 @@ struct App::Impl {
     InputOverlay inputOverlay;
     double updateCheckAt = 12.0;   // seconds after start
     Hotkeys hotkeys;
+    GameDetector games;
+    GameProfiles profiles;
+    std::string activeGame;            // profile in effect while this game runs
+    std::string activeGameName;
+    bool bufferByGame = false;         // the buffer was started because a game with Auto-record launched
+    Settings Effective() const;        // settings with the running game's profile applied
+    void OnGameEvent(const GameEvent& e);
     Tray tray;
     Toasts toasts;
     // Bookmarks: marks in wall-clock time, matched to clips when they're saved.
@@ -251,6 +261,9 @@ bool App::Impl::Init(void* hinstance, bool startHidden)
     ImGui_ImplDX11_Init(window.Device(), window.Context());
     if (!glass.Init(window.Device(), window.Context())) Log("Glass renderer unavailable; using the simple backdrop");
     updater.CleanupOld();
+    profiles.Load(JoinPath(AppDataDir(), L"profiles"));
+    games.SetManual(profiles.ManualGames());
+    games.Start(LocalDataDir());
     LoadFonts();
     toasts.Init(hinst);
     ApplyThemeNow();
@@ -274,7 +287,7 @@ bool App::Impl::Init(void* hinstance, bool startHidden)
     engine->Configure(BuildConfig());
     if (settings.replay.enabled) engine->StartBuffer();
 
-    hotkeys.Apply(window.Hwnd(), settings.hotkeys);
+    hotkeys.Apply(window.Hwnd(), Effective().hotkeys);
     for (int i = 0; i < kHotkeyCount; ++i)
         if (hotkeys.Status((HotkeyAction)i) == HotkeyStatus::InUse) {
             Toast(ToastKind::Error, "A hotkey is taken", std::string(HotkeyActionLabel((HotkeyAction)i)) + " \xE2\x80\x94 change it in Settings > Hotkeys");
@@ -314,6 +327,7 @@ void App::Impl::Shutdown()
     stats.Stop();
     hotkeys.UnregisterAll();
     tray.Remove();
+    games.Stop();
     toasts.Shutdown();
     if (imguiReady) {
         ImGui_ImplDX11_Shutdown();
@@ -342,6 +356,9 @@ AppContext App::Impl::MakeContext()
     ctx.updater = &updater;
     ctx.account = Account::Enabled() ? &account : nullptr;
     ctx.inputOverlay = &inputOverlay;
+    ctx.games = &games;
+    ctx.profiles = &profiles;
+    ctx.activeGame = activeGame;
     return ctx;
 }
 
@@ -400,10 +417,13 @@ void App::Impl::Tick()
     // The replay buffer follows the setting (with a retry delay if the engine reports an error).
     const engine::EngineStatus st = engine->Status();
     const bool on = st.buffer != engine::BufferState::Off && st.buffer != engine::BufferState::Error;
-    if (settings.replay.enabled && !on && now - lastBufferStart > 5.0) {
+    GameEvent ge;
+    while (games.PollEvent(ge)) OnGameEvent(ge);
+    const bool wantBuffer = settings.replay.enabled || bufferByGame;
+    if (wantBuffer && !on && now - lastBufferStart > 5.0) {
         engine->StartBuffer();
         lastBufferStart = now;
-    } else if (!settings.replay.enabled && on) {
+    } else if (!wantBuffer && on) {
         engine->StopBuffer();
     }
     if (engineConfigPending && now >= engineConfigAt) {
@@ -661,9 +681,17 @@ void App::Impl::ApplyOpenTransition(ImDrawData* dd)
 // Settings plumbing
 // ---------------------------------------------------------------------------------------------
 
+Settings App::Impl::Effective() const
+{
+    if (activeGame.empty()) return settings;
+    const GameProfile* p = profiles.Find(activeGame);
+    return p ? ApplyProfile(settings, *p) : settings;
+}
+
 engine::CaptureConfig App::Impl::BuildConfig() const
 {
-    const Settings& s = settings;
+    const Settings eff = Effective();
+    const Settings& s = eff;
     engine::CaptureConfig c;
     static const int heights[] = { 0, 2160, 1440, 1080, 720 };
     c.source = s.video.source;
@@ -761,7 +789,7 @@ void App::Impl::ApplyChanges()
     }
     if (ui.hotkeysDirty) {
         ui.hotkeysDirty = false;
-        if (!hotkeys.Suspended()) hotkeys.Apply(window.Hwnd(), settings.hotkeys);
+        if (!hotkeys.Suspended()) hotkeys.Apply(window.Hwnd(), Effective().hotkeys);
     }
     if (ui.audioDirty) {
         ui.audioDirty = false;
@@ -816,7 +844,13 @@ void App::Impl::ProcessKeyCapture()
     int& slot = ui.settings.capturing;
     if (slot < 0 || !kc.done) return;
     if (!kc.cancelled) {
-        if (slot == kPushToTalkSlot) {
+        if (slot >= kProfileKeySlot && slot < kProfileKeySlot + 3 && !ui.settings.gameProfile.empty()) {
+            GameProfile& gp = profiles.Get(ui.settings.gameProfile, ui.settings.gameProfile);
+            std::optional<Hotkey>& k = slot == kProfileKeySlot ? gp.saveKey : (slot == kProfileKeySlot + 1 ? gp.bookmarkKey : gp.screenshotKey);
+            if (kc.cleared) k.reset();   // back to the main hotkey
+            else k = Hotkey{ kc.vk, kc.mods };
+            profiles.Save(gp);
+        } else if (slot == kPushToTalkSlot) {
             if (!kc.cleared) settings.audio.pushToTalkKey = kc.vk;
             ui.audioDirty = true;
             ui.engineDirty = true;
@@ -839,7 +873,7 @@ void App::Impl::ProcessKeyCapture()
     kc = KeyCapture{};
     slot = -1;
     hotkeys.Suspend(false);
-    hotkeys.Apply(window.Hwnd(), settings.hotkeys);
+    hotkeys.Apply(window.Hwnd(), Effective().hotkeys);
 }
 
 void App::Impl::ProcessActions()
@@ -926,7 +960,44 @@ void App::Impl::Sound(platform::Sound s)
     if (settings.general.sounds) platform::PlaySoundCue(s);
 }
 
-std::wstring App::Impl::CurrentGame() { return platform::ForegroundAppName(window.Hwnd()); }
+std::wstring App::Impl::CurrentGame()
+{
+    if (!activeGame.empty()) {   // the detected game's name, or its profile's own folder
+        const GameProfile* p = profiles.Find(activeGame);
+        if (p && p->folder && !p->folder->empty()) return *p->folder;
+        return ToWide(activeGameName);
+    }
+    return platform::ForegroundAppName(window.Hwnd());
+}
+
+void App::Impl::OnGameEvent(const GameEvent& e)
+{
+    if (e.type == GameEventType::Started) {
+        activeGame = e.game.id;
+        activeGameName = e.game.name;
+        GameProfile& p = profiles.Get(e.game.id, e.game.name);
+        p.name = e.game.name;
+        if (p.launcher.empty()) p.launcher = e.game.launcher;
+        p.lastPlayed = (int64_t)std::time(nullptr);
+        profiles.Save(p);
+        ui.engineDirty = ui.hotkeysDirty = true;   // its overrides take effect now
+        const engine::EngineStatus st = engine->Status();
+        const bool on = st.buffer != engine::BufferState::Off && st.buffer != engine::BufferState::Error;
+        if (p.autoRecord && !on) {
+            bufferByGame = true;
+            engine->StartBuffer();
+            Toast(ToastKind::Info, e.game.name + " detected", "Replay buffer started", ICON_GAME);
+        } else if (p.OverrideCount() > 0) {
+            Toast(ToastKind::Info, e.game.name + " detected", "Using its own settings", ICON_GAME);
+        }
+    } else {
+        if (bufferByGame && !settings.replay.enabled) engine->StopBuffer();
+        bufferByGame = false;
+        activeGame.clear();
+        activeGameName.clear();
+        ui.engineDirty = ui.hotkeysDirty = true;   // back to the main settings
+    }
+}
 
 std::string App::Impl::GameFromPath(const std::wstring& path) const
 {
