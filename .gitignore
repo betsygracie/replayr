@@ -1,0 +1,9 @@
+build/
+out/
+.vs/
+CMakeSettings.json
+CMakeUserPresets.json
+vendor/imgui/
+vendor/nlohmann/
+vendor/ffmpeg/
+*.user

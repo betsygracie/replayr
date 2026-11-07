@@ -1,0 +1,24 @@
+# Replayr account server: Cloudflare Workers + D1 + R2 (all on the free plan).
+# See server/README.md for the one-time setup.
+name = "replayr"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "replayr"
+database_id = "PUT-YOUR-D1-DATABASE-ID-HERE"
+
+[[r2_buckets]]
+binding = "CLIPS"
+bucket_name = "replayr-clips"
+
+[vars]
+# Shown on share pages. Change if you use your own domain.
+APP_NAME = "Replayr"
+MAX_UPLOAD_MB = "95"          # the free plan accepts request bodies up to 100 MB
+
+# Secrets (set with `npx wrangler secret put NAME`, never put them in this file):
+#   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET   from https://discord.com/developers/applications
+#   STEAM_API_KEY                              from https://steamcommunity.com/dev/apikey (for names/avatars)
+#   TOKEN_SECRET                               any long random string (signs access tokens)
