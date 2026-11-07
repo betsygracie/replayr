@@ -22,6 +22,8 @@ struct DesktopCaptureParams {
     int outputHeight = 0;          // 0 = native
     int fps = 60;
     bool cursor = true;
+    bool gameWindow = false;       // "Game only": capture the game's window with Windows Graphics Capture
+    bool hideBorder = true;        // ask Windows not to draw the yellow capture border (Windows 11)
 };
 
 // Captures one monitor with DXGI Desktop Duplication on the GPU that drives it, composites the
@@ -52,7 +54,8 @@ public:
     int SourceWidth() const;
     int SourceHeight() const;
     ID3D11Device* Device() const;
-    std::string MonitorName() const;
+    std::string MonitorName() const;   // "Display 1", or "Game: <window title>"
+    bool GameVisible() const;          // game mode: a game window is being captured right now
     std::string GpuName() const;
 
     struct Impl;

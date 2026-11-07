@@ -255,7 +255,7 @@ bool App::Impl::Init(void* hinstance, bool startHidden)
     audio.Start();
     ApplyAudio();
 
-    engine = engine::CreateClipEngine(library);
+    engine = engine::CreateCaptureEngine(library);
     engine->Configure(BuildConfig());
     if (settings.replay.enabled) engine->StartBuffer();
 
@@ -646,6 +646,7 @@ engine::CaptureConfig App::Impl::BuildConfig() const
     c.codec = engine::ParseCodec(s.video.codec);
     c.qualityPreset = s.video.quality;
     c.captureCursor = s.video.captureCursor;
+    c.hideCaptureBorder = s.video.hideBorder;
     c.replaySeconds = s.replay.seconds;
     c.sampleRate = 48000;
     c.separateTracks = s.audio.separateTracks;
@@ -735,6 +736,14 @@ void App::Impl::ApplyChanges()
         library.SetRoot(settings.ClipsFolder());
         library.SetPolicy(Policy());
         stats.SetDiskPath(settings.ClipsFolder());
+    }
+    {   // Keep Replayr's window out of its own recordings (Windows 10 2004+; ignored before).
+        static int affinity = -1;
+        const int want = settings.video.hideApp ? 0x11 /* WDA_EXCLUDEFROMCAPTURE */ : 0;
+        if (want != affinity && window.Hwnd()) {
+            platform::ExcludeFromCapture(window.Hwnd(), want != 0);
+            affinity = want;
+        }
     }
     if (ui.engineDirty) {
         ui.engineDirty = false;

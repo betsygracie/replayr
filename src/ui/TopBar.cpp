@@ -94,6 +94,32 @@ void DrawTopBar(AppContext& ctx, float height)
         x -= pw + S(10.0f);
     }
 
+    // Replay buffer pill (while the buffer runs and nothing is being recorded): "● Buffer · Game · 2:00".
+    {
+        const bool bufOn = st.buffer == engine::BufferState::Filling || st.buffer == engine::BufferState::Ready;
+        const float bv = Anim(ImGui::GetID("##bufpill"), bufOn && !st.recording ? 1.0f : 0.0f, Motion::Slide);
+        if (bv > 0.01f && x - a.x > S(520.0f)) {
+            const std::string& src = ctx.settings.video.source;
+            const char* what = src == "game" ? "Game" : (src.rfind("both:", 0) == 0 ? "Game + Screen" : "Screen");
+            const std::string label = std::string("Buffer  \xC2\xB7  ") + what + "  \xC2\xB7  " + FormatDuration(st.bufferTargetSeconds);
+            PushFont(GetFonts().medium, Type::Caption);
+            const float pw = ImGui::CalcTextSize(label.c_str()).x + S(36.0f);
+            const ImVec2 pa(x - pw, cy - S(14.0f)), pb(x, cy + S(14.0f));
+            ImGui::SetCursorScreenPos(pa);
+            ImGui::InvisibleButton("##bufinfo", ImVec2(pw, pb.y - pa.y));
+            const std::string tip = (st.buffer == engine::BufferState::Ready ? "Replay ready: " : "Filling the replay buffer: ") + st.sourceName;
+            Tooltip(tip.c_str());
+            hit(pa, pb);
+            dl->AddRectFilled(pa, pb, White(0.07f * bv), S(14.0f));
+            dl->AddRect(pa, pb, White(0.16f * bv), S(14.0f));
+            const ImU32 dot = st.buffer == engine::BufferState::Ready ? ColA(Pal().success, bv) : ColA(Pal().warning, bv);
+            PulseDot(dl, ImVec2(pa.x + S(15.0f), cy), S(3.5f), dot);
+            dl->AddText(ImVec2(pa.x + S(26.0f), cy - ImGui::GetFontSize() * 0.5f), White(0.9f * bv), label.c_str());
+            PopFont();
+            x -= pw + S(10.0f);
+        }
+    }
+
     // Search, centred in the bar (or squeezed left of the right cluster).
     const float sw = std::min(S(480.0f), x - a.x - S(32.0f));
     if (sw > S(160.0f)) {

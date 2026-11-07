@@ -511,33 +511,79 @@ void Recording(AppContext& ctx)
         Right(CW());
         if (SliderInt("##replaylen", &s.replay.seconds, 15, 600, v, 15, CW())) ctx.ChangedEngine();
         RowEnd();
+        {   // The buffer lives on disk as short segments: roughly bitrate x length (x2 in Both mode).
+            const int copies = s.video.source.rfind("both:", 0) == 0 ? 2 : 1;
+            const double mb = (s.video.bitrateMbps + 0.2) * s.replay.seconds / 8.0 * copies;
+            char est[128];
+            if (mb >= 1024.0) snprintf(est, sizeof(est), "The buffer uses about %.1f GB of disk while it runs, and very little RAM.", mb / 1024.0);
+            else snprintf(est, sizeof(est), "The buffer uses about %.0f MB of disk while it runs, and very little RAM.", mb);
+            TextWrapped(est, Pal().textFaint, ImGui::GetContentRegionAvail().x, GetFonts().regular, Type::Caption);
+        }
     }
     EndRows();
 
     Group("Video");
     if (BeginRows("##video")) {
-        Row("Capture", "Which screen to record. \"Game's display\" follows the window in front.");
-        std::string current = "Game's display";
-        if (s.video.source.rfind("monitor:", 0) == 0) {
-            const int idx = atoi(s.video.source.c_str() + 8);
-            current = idx < (int)ctx.monitors.size() ? ctx.monitors[(size_t)idx].name : "Display " + std::to_string(idx + 1);
-        }
+        // Capture source: Game only / Whole screen / Both.
+        const bool isGame = s.video.source == "game", isBoth = s.video.source.rfind("both:", 0) == 0;
+        int mode = isGame ? 0 : (isBoth ? 2 : 1);
+        static const char* modes[] = { "Game only", "Whole screen", "Both" };
+        static const char* modeHelp[] = {
+            "Records just the game's window. Notifications, Discord pop-ups and other windows never show up.",
+            "Records everything on the screen you pick, including other windows and pop-ups.",
+            "Records the game and the whole screen at the same time, and saves both as separate files.",
+        };
+        Row("Capture source", modeHelp[mode]);
         Right(CW());
-        if (BeginDropdown("##source", current.c_str(), CW(), ICON_MONITOR)) {
-            for (size_t i = 0; i < ctx.monitors.size(); ++i) {
-                const std::string key = "monitor:" + std::to_string(i);
-                if (DropdownItem(ctx.monitors[i].name.c_str(), s.video.source == key, ICON_MONITOR)) {
-                    s.video.source = key;
-                    ctx.ChangedEngine();
-                }
-            }
-            if (DropdownItem("Game's display", s.video.source == "window:foreground", ICON_GAME)) {
-                s.video.source = "window:foreground";
-                ctx.ChangedEngine();
-            }
-            EndDropdown();
+        if (Segmented("##capmode", &mode, modes, 3, CW())) {
+            // Remember which screen was picked, so switching modes doesn't lose it.
+            int mon = 0;
+            if (s.video.source.rfind("monitor:", 0) == 0) mon = atoi(s.video.source.c_str() + 8);
+            else if (isBoth) mon = atoi(s.video.source.c_str() + 5);
+            s.video.source = mode == 0 ? std::string("game") : (mode == 1 ? "monitor:" + std::to_string(mon) : "both:" + std::to_string(mon));
+            ctx.ChangedEngine();
         }
         RowEnd();
+
+        if (mode != 0) {
+            Row(mode == 2 ? "Screen" : "Which screen", mode == 1 ? "\"Game's display\" follows the window in front." : nullptr);
+            std::string current = "Game's display";
+            int idx = -1;
+            if (s.video.source.rfind("monitor:", 0) == 0) idx = atoi(s.video.source.c_str() + 8);
+            else if (mode == 2) idx = atoi(s.video.source.c_str() + 5);
+            if (idx >= 0) current = idx < (int)ctx.monitors.size() ? ctx.monitors[(size_t)idx].name : "Display " + std::to_string(idx + 1);
+            Right(CW());
+            if (BeginDropdown("##source", current.c_str(), CW(), ICON_MONITOR)) {
+                for (size_t i = 0; i < ctx.monitors.size(); ++i) {
+                    const std::string key = (mode == 2 ? "both:" : "monitor:") + std::to_string(i);
+                    if (DropdownItem(ctx.monitors[i].name.c_str(), s.video.source == key, ICON_MONITOR)) {
+                        s.video.source = key;
+                        ctx.ChangedEngine();
+                    }
+                }
+                if (mode == 1 && DropdownItem("Game's display", s.video.source == "window:foreground", ICON_GAME)) {
+                    s.video.source = "window:foreground";
+                    ctx.ChangedEngine();
+                }
+                EndDropdown();
+            }
+            RowEnd();
+        }
+        if (mode == 2) {
+            Row("Uses more of your PC",
+                "Two recordings at once: about twice the encoder work and twice the buffer on disk (roughly 2-4% more GPU load "
+                "in games). If your GPU can't run two at once, Replayr records the game only and tells you.");
+            Right(S(24.0f));
+            Icon(ImGui::GetWindowDrawList(), ICON_WARNING, ImVec2(ImGui::GetCursorScreenPos().x + S(12.0f), ImGui::GetCursorScreenPos().y + S(14.0f)),
+                 S(16.0f), Pal().warning);
+            ImGui::Dummy(ImVec2(S(24.0f), S(28.0f)));
+            RowEnd();
+        }
+        if (mode != 1)
+            ToggleRow("Hide the capture border", "Asks Windows not to draw a yellow border around the game while it's recorded (Windows 11).",
+                      &s.video.hideBorder, ctx, &AppContext::ChangedEngine);
+        ToggleRow("Hide Replayr from recordings", "Keeps Replayr's own window out of your clips and screenshots.", &s.video.hideApp, ctx,
+                  &AppContext::Changed);
 
         Row("Resolution", "Lower resolutions make smaller files. Never upscales.");
         static const char* resolutions[] = { "Native", "2160p", "1440p", "1080p", "720p" };

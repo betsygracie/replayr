@@ -47,6 +47,8 @@ bool CopyTextToClipboard(void* ownerHwnd, const std::string& utf8);
 
 // Data embedded in the exe as an RCDATA resource (fonts). Null if missing.
 const void* EmbeddedResource(const wchar_t* name, size_t* size);
+// Keeps a window out of screen captures and screenshots (Windows 10 2004+; no-op before).
+void ExcludeFromCapture(void* hwnd, bool exclude);
 void AttachConsoleWindow();                              // --console (debug builds)
 
 } // namespace cs::platform

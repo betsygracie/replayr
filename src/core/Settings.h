@@ -35,7 +35,11 @@ const char* HotkeyActionLabel(HotkeyAction a);
 const char* HotkeyActionKey(HotkeyAction a);   // JSON key
 
 struct VideoSettings {
-    std::string source = "monitor:0";   // "monitor:<index>" or "window:foreground"
+    // "game" (game window only), "monitor:<index>" / "window:foreground" (whole screen),
+    // or "both:<index>" (game + that screen, saved as two files).
+    std::string source = "monitor:0";
+    bool hideBorder = true;             // game capture without the yellow border (Windows 11)
+    bool hideApp = true;                // keep Replayr's own window out of recordings and screenshots
     int resolution = 3;                 // 0 native, 1 2160p, 2 1440p, 3 1080p, 4 720p
     int fps = 60;                       // 30 / 60 / 120 / 144
     int bitrateMbps = 25;

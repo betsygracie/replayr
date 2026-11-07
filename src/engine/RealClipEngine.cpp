@@ -147,11 +147,11 @@ struct PendingSave {
 
 class RealClipEngine final : public IClipEngine {
 public:
-    explicit RealClipEngine(ClipLibrary& lib) : lib_(lib)
+    RealClipEngine(ClipLibrary& lib, const std::wstring& bufferName) : lib_(lib)
     {
         MediaStartup();
         encoders_ = DetectEncoders();
-        bufferDir_ = JoinPath(LocalDataDir(), L"Buffer");
+        bufferDir_ = JoinPath(LocalDataDir(), bufferName);
         EnsureDir(bufferDir_);
         CleanBufferDir();
         thread_ = std::thread([this] { Loop(); });
@@ -190,6 +190,7 @@ public:
         if (st_.encoderName.empty()) st_.encoderName = std::string("Media Foundation ") + CodecLabel(cfg.codec == Codec::AV1 ? Codec::H264 : cfg.codec);
         if (st_.sourceName.empty() || restart) {
             if (cfg.source.rfind("monitor:", 0) == 0) st_.sourceName = "Display " + std::to_string(atoi(cfg.source.c_str() + 8) + 1);
+            else if (cfg.source == "game") st_.sourceName = "Game";
             else st_.sourceName = "Foreground window's display";
         }
         if (restart && configured_) PushCmdLocked({ CmdType::Reconfigure });
@@ -348,7 +349,7 @@ private:
         return a.source != b.source || a.outputHeight != b.outputHeight || a.fps != b.fps || a.bitrateKbps != b.bitrateKbps ||
                a.encoder != b.encoder || a.codec != b.codec || a.captureCursor != b.captureCursor || a.separateTracks != b.separateTracks ||
                a.captureSystem != b.captureSystem || a.captureMic != b.captureMic || a.outputDeviceId != b.outputDeviceId ||
-               a.inputDeviceId != b.inputDeviceId;
+               a.inputDeviceId != b.inputDeviceId || a.hideCaptureBorder != b.hideCaptureBorder;
     }
 
     static std::string FirstLine(const std::string& s)
@@ -400,7 +401,7 @@ private:
         const std::wstring name = SanitizeFileName(game.empty() ? L"Clip" : game);
         if (cfg.perGameFolders && !game.empty()) folder = JoinPath(folder, name);
         EnsureDir(folder);
-        return UniquePath(JoinPath(folder, name + L" " + TimestampForFile() + L".mp4"));
+        return UniquePath(JoinPath(folder, name + L" " + TimestampForFile() + cfg.fileSuffix + L".mp4"));
     }
 
     void Spawn(std::function<void()> fn)
@@ -540,6 +541,8 @@ private:
         dp.outputHeight = scfg_.outputHeight;
         dp.fps = std::clamp(scfg_.fps, 10, 240);
         dp.cursor = scfg_.captureCursor;
+        dp.gameWindow = scfg_.source == "game";
+        dp.hideBorder = scfg_.hideCaptureBorder;
         fps_ = dp.fps;
         capture_ = std::make_unique<DesktopCapture>();
         bool ok = capture_->Open(dp, error);
@@ -1097,7 +1100,9 @@ private:
             std::lock_guard<std::mutex> lock(segMutex_);
             for (const Segment& s : segments_) bytes += s.bytes;
         }
+        const std::string srcName = capture_ ? capture_->MonitorName() : std::string();
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!srcName.empty()) st_.sourceName = srcName;   // game mode: follows the game's title
         st_.captureFps = fps;
         st_.droppedFrames = dropped_;
         if (wantBuffer_) {
@@ -1188,9 +1193,9 @@ private:
 
 } // namespace
 
-std::unique_ptr<IClipEngine> CreateClipEngine(ClipLibrary& library)
+std::unique_ptr<IClipEngine> CreateClipEngine(ClipLibrary& library, const std::wstring& bufferName)
 {
-    return std::make_unique<RealClipEngine>(library);
+    return std::make_unique<RealClipEngine>(library, bufferName);
 }
 
 } // namespace cs::engine

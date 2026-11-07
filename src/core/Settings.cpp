@@ -118,6 +118,8 @@ bool LoadSettings(const std::wstring& path, Settings& s, std::string* error)
         Get(v, "codec", s.video.codec);
         Get(v, "quality", s.video.quality);
         Get(v, "captureCursor", s.video.captureCursor);
+        Get(v, "hideBorder", s.video.hideBorder);
+        Get(v, "hideApp", s.video.hideApp);
     }
     if (j.contains("replay")) {
         const json& r = j["replay"];
@@ -281,7 +283,7 @@ std::string SerializeSettings(const Settings& s)
     j["video"] = {
         { "source", s.video.source }, { "resolution", s.video.resolution }, { "fps", s.video.fps },
         { "bitrateMbps", s.video.bitrateMbps }, { "encoder", s.video.encoder }, { "codec", s.video.codec },
-        { "quality", s.video.quality }, { "captureCursor", s.video.captureCursor },
+        { "quality", s.video.quality }, { "captureCursor", s.video.captureCursor }, { "hideBorder", s.video.hideBorder }, { "hideApp", s.video.hideApp },
     };
     j["replay"] = { { "enabled", s.replay.enabled }, { "seconds", s.replay.seconds } };
 

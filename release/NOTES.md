@@ -1,1 +1,1 @@
-Editor timeline: trim handles always grab (the scrub area no longer steals the click), no more sticking while dragging, and no jump when you grab a handle.
+Capture source: Game only (just the game window, no pop-ups), Whole screen, or Both (two files per clip). Game-not-visible card, hidden capture border, Replayr hidden from its own recordings, buffer size estimate, buffer status pill.

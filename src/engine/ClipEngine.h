@@ -40,7 +40,10 @@ struct AudioTrackConfig {
 };
 
 struct CaptureConfig {
-    std::string source = "monitor:0";   // "monitor:<index>" or "window:foreground"
+    // "monitor:<index>" (whole screen), "window:foreground" (the screen the active window is on),
+    // "game" (the game's window only) or "both:<index>" (game + whole screen, two files per clip).
+    std::string source = "monitor:0";
+    bool hideCaptureBorder = true;      // game capture: no yellow border (Windows 11)
     int outputHeight = 0;               // 0 = native, else scale to this height
     int fps = 60;
     int bitrateKbps = 40000;
@@ -63,6 +66,7 @@ struct CaptureConfig {
     std::wstring ffmpegPath;            // "" = auto-detect
     std::wstring outputDeviceId;        // "" = default playback device (loopback)
     std::wstring inputDeviceId;         // "" = default microphone
+    std::wstring fileSuffix;            // added to saved file names ("_game", "_screen" in Both mode)
 };
 
 struct EngineStatus {
@@ -142,6 +146,12 @@ public:
 };
 
 // Desktop Duplication + Media Foundation backend (RealClipEngine.cpp).
-std::unique_ptr<IClipEngine> CreateClipEngine(ClipLibrary& library);
+// `bufferName` is the folder under %LOCALAPPDATA%\Replayr for the replay segments; a second engine
+// running at the same time needs its own.
+std::unique_ptr<IClipEngine> CreateClipEngine(ClipLibrary& library, const std::wstring& bufferName = L"Buffer");
+
+// "Both" capture: wraps two engines (game window + whole screen) behind one IClipEngine
+// (DualClipEngine.cpp). With any other source it behaves exactly like the single engine.
+std::unique_ptr<IClipEngine> CreateCaptureEngine(ClipLibrary& library);
 
 } // namespace cs::engine

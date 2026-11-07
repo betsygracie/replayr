@@ -96,6 +96,8 @@ set(CS_SOURCES
 
     src/engine/RealClipEngine.cpp
     src/engine/DesktopCapture.cpp
+    src/engine/WindowCapture.cpp
+    src/engine/DualClipEngine.cpp
     src/engine/MediaWriter.cpp
     src/engine/AudioInput.cpp
     src/engine/Encoder.cpp

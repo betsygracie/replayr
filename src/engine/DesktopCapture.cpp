@@ -3,6 +3,7 @@
 #include "core/Log.h"
 #include "core/Platform.h"
 #include "core/Util.h"
+#include "engine/WindowCapture.h"
 
 #include <windows.h>
 #include <d3d10.h>
@@ -51,6 +52,17 @@ struct DesktopCapture::Impl {
     bool GdiInit();
     void GdiGrab();
     void GdiFree();
+
+    // Game mode: the game's window through Windows Graphics Capture, drawn into `frame` at (0,0);
+    // the video processor scales the content rectangle to fit the output (letterboxed).
+    std::unique_ptr<WindowCapture> wgc;
+    int contentW = 0, contentH = 0;
+    double lastFind = -10.0;
+    bool placeholder = false, gameCursor = true;
+    std::wstring placeholderTitle;
+    std::string gameTitle;
+    void GameUpdate();
+    void ShowPlaceholder(const wchar_t* title, const wchar_t* text);
 
     // frame: newest desktop image. compose: frame + cursor (GDI-compatible, so DrawIconEx works).
     ComPtr<ID3D11Texture2D> frame, compose;
@@ -162,7 +174,18 @@ bool DesktopCapture::Open(const DesktopCaptureParams& p, std::string& error)
     ComPtr<ID3D10Multithread> mt;
     if (SUCCEEDED(m.device.As(&mt))) mt->SetMultithreadProtected(TRUE);
 
-    if (m.CreateDup()) {
+    if (p.gameWindow) {
+        // The canvas is the size of the monitor the game is on; the game is drawn into it as-is.
+        m.srcW = m.monitorRect.right - m.monitorRect.left;
+        m.srcH = m.monitorRect.bottom - m.monitorRect.top;
+        m.wgc = std::make_unique<WindowCapture>();
+        m.gameCursor = p.cursor;
+        m.params.cursor = false;   // Windows Graphics Capture draws the cursor itself
+        if (!WindowCapture::Supported()) {
+            error = "Game-only capture needs Windows 10 (version 1903) or newer. Use Whole screen instead.";
+            return false;
+        }
+    } else if (m.CreateDup()) {
         DXGI_OUTDUPL_DESC dd{};
         m.dup->GetDesc(&dd);
         m.srcW = (int)dd.ModeDesc.Width;
@@ -220,6 +243,11 @@ bool DesktopCapture::Open(const DesktopCaptureParams& p, std::string& error)
     if (m.path == FramePath::CpuRgb) {   // MF's software converter can't scale reliably
         m.outW = m.srcW & ~1;
         m.outH = m.srcH & ~1;
+    }
+    if (p.gameWindow) {
+        m.contentW = m.srcW;
+        m.contentH = m.srcH;
+        m.GameUpdate();
     }
     Log("Capture: %s on %s, %dx%d -> %dx%d @ %d fps (%s)", m.monitorName.c_str(), m.gpuName.c_str(), m.srcW, m.srcH, m.outW, m.outH,
         p.fps, FramePathLabel(m.path));
@@ -311,6 +339,9 @@ void DesktopCapture::Close()
     Impl& m = *impl_;
     m.GdiFree();
     m.gdi = false;
+    if (m.wgc) m.wgc->Close();
+    m.wgc.reset();
+    m.placeholder = false;
     if (m.context) m.context->ClearState();
     m.inView.Reset();
     m.vproc.Reset();
@@ -333,6 +364,10 @@ void DesktopCapture::Close()
 bool DesktopCapture::Update()
 {
     Impl& m = *impl_;
+    if (m.wgc) {
+        m.GameUpdate();
+        return true;
+    }
     if (m.gdi) {
         m.GdiGrab();
         return true;
@@ -410,6 +445,19 @@ bool DesktopCapture::Impl::ConvertTo(ID3D11Texture2D* nv12)
     ovd.Texture2D.MipSlice = 0;
     ComPtr<ID3D11VideoProcessorOutputView> outView;
     if (FAILED(vdev->CreateVideoProcessorOutputView(nv12, venum.Get(), &ovd, &outView))) return false;
+    if (wgc) {   // fit the game's content into the output, black bars around it
+        const int cw = std::max(1, contentW), ch = std::max(1, contentH);
+        const double k = std::min((double)outW / cw, (double)outH / ch);
+        const int dw = std::max(2, (int)(cw * k)) & ~1, dh = std::max(2, (int)(ch * k)) & ~1;
+        const int dx = ((outW - dw) / 2) & ~1, dy = ((outH - dh) / 2) & ~1;
+        RECT src{ 0, 0, cw, ch }, dst{ dx, dy, dx + dw, dy + dh }, full{ 0, 0, outW, outH };
+        vctx->VideoProcessorSetStreamSourceRect(vproc.Get(), 0, TRUE, &src);
+        vctx->VideoProcessorSetStreamDestRect(vproc.Get(), 0, TRUE, &dst);
+        vctx->VideoProcessorSetOutputTargetRect(vproc.Get(), TRUE, &full);
+        D3D11_VIDEO_COLOR black{};
+        black.RGBA = { 0.0f, 0.0f, 0.0f, 1.0f };
+        vctx->VideoProcessorSetOutputBackgroundColor(vproc.Get(), FALSE, &black);
+    }
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
     stream.Enable = TRUE;
     stream.pInputSurface = inView.Get();
@@ -506,7 +554,106 @@ int DesktopCapture::OutHeight() const { return impl_->outH; }
 int DesktopCapture::SourceWidth() const { return impl_->srcW; }
 int DesktopCapture::SourceHeight() const { return impl_->srcH; }
 ID3D11Device* DesktopCapture::Device() const { return impl_->device.Get(); }
-std::string DesktopCapture::MonitorName() const { return impl_->monitorName; }
+std::string DesktopCapture::MonitorName() const
+{
+    if (!impl_->wgc) return impl_->monitorName;
+    return impl_->gameTitle.empty() ? std::string("Game (waiting)") : "Game: " + impl_->gameTitle;
+}
+bool DesktopCapture::GameVisible() const { return impl_->wgc && !impl_->placeholder; }
+
+// Game mode: keep a capture of the game's window going; show a card while there isn't one.
+void DesktopCapture::Impl::GameUpdate()
+{
+    HWND w = wgc->Window();
+    if (wgc->IsOpen() && wgc->Closed()) {   // the game closed
+        wgc->Close();
+        gameTitle.clear();
+        w = nullptr;
+    }
+    if (!wgc->IsOpen()) {
+        const double now = NowSeconds();
+        if (now - lastFind > 1.0) {   // look for a game at most once a second
+            lastFind = now;
+            if (HWND g = FindGameWindow(GetCurrentProcessId())) {
+                std::string err;
+                if (wgc->Open(device.Get(), g, gameCursor, params.hideBorder, err)) {
+                    w = g;
+                    gameTitle = WindowTitle(g);
+                } else {
+                    Log("Game capture: %s", err.c_str());
+                }
+            }
+        }
+    }
+    if (!wgc->IsOpen()) {
+        ShowPlaceholder(L"Waiting for a game", L"Switch to your game and Replayr will start capturing it.");
+        return;
+    }
+    if (IsIconic(w)) {
+        ShowPlaceholder(L"Game not visible", L"The game is minimised. Recording carries on when it's back.");
+        return;
+    }
+    int cw = contentW, ch = contentH;
+    if (wgc->Poll(context.Get(), frame.Get(), srcW, srcH, cw, ch)) {
+        if ((cw != contentW || ch != contentH) && path == FramePath::CpuRgb && frameRtv) {
+            const float black[4] = { 0, 0, 0, 1 };   // CPU path shows the canvas as-is: clear old edges
+            context->ClearRenderTargetView(frameRtv.Get(), black);
+            wgc->Poll(context.Get(), frame.Get(), srcW, srcH, cw, ch);
+        }
+        contentW = cw;
+        contentH = ch;
+        placeholder = false;
+    }
+}
+
+// A dark card with a title and a line of text, drawn with GDI into the canvas.
+void DesktopCapture::Impl::ShowPlaceholder(const wchar_t* title, const wchar_t* text)
+{
+    if (placeholder && placeholderTitle == title) return;   // already on screen
+    placeholderTitle = title;
+    placeholder = true;
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = srcW;
+    bi.bmiHeader.biHeight = -srcH;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!dc || !bmp || !bits) {
+        if (bmp) DeleteObject(bmp);
+        if (dc) DeleteDC(dc);
+        return;
+    }
+    HGDIOBJ old = SelectObject(dc, bmp);
+    RECT all{ 0, 0, srcW, srcH };
+    HBRUSH bg = CreateSolidBrush(RGB(14, 8, 28));
+    FillRect(dc, &all, bg);
+    DeleteObject(bg);
+    SetBkMode(dc, TRANSPARENT);
+    const int big = std::max(18, srcH / 22), small = std::max(12, srcH / 48);
+    HFONT f1 = CreateFontW(-big, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HFONT f2 = CreateFontW(-small, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    RECT r1{ 0, srcH / 2 - big - small / 2, srcW, srcH / 2 };
+    RECT r2{ 0, srcH / 2 + small / 2, srcW, srcH / 2 + small * 3 };
+    SelectObject(dc, f1);
+    SetTextColor(dc, RGB(245, 240, 255));
+    DrawTextW(dc, title, -1, &r1, DT_CENTER | DT_BOTTOM | DT_SINGLELINE);
+    SelectObject(dc, f2);
+    SetTextColor(dc, RGB(170, 160, 200));
+    DrawTextW(dc, text, -1, &r2, DT_CENTER | DT_TOP | DT_SINGLELINE);
+    GdiFlush();
+    context->UpdateSubresource(frame.Get(), 0, nullptr, bits, (UINT)srcW * 4, 0);
+    contentW = srcW;
+    contentH = srcH;
+    SelectObject(dc, old);
+    DeleteObject(f1);
+    DeleteObject(f2);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+}
 std::string DesktopCapture::GpuName() const { return impl_->gpuName; }
 
 } // namespace cs::engine

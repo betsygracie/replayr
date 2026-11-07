@@ -3,7 +3,7 @@
 // Change the app's name here: window title, tray, folders and registry entries all use it.
 #define CS_APP_NAME     "Replayr"
 #define CS_APP_NAME_W   L"Replayr"
-#define CS_APP_VERSION  "0.2.3"
+#define CS_APP_VERSION  "0.3.0"
 
 #define CS_WINDOW_CLASS L"ReplayrMainWindow"
 #define CS_MUTEX_NAME   L"Local\\Replayr.SingleInstance"

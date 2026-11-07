@@ -566,6 +566,11 @@ bool CopyImageToClipboard(void* ownerHwnd, const std::wstring& imagePath)
     return ok;
 }
 
+void ExcludeFromCapture(void* hwnd, bool exclude)
+{
+    if (hwnd) SetWindowDisplayAffinity((HWND)hwnd, exclude ? 0x11 /* WDA_EXCLUDEFROMCAPTURE */ : 0 /* WDA_NONE */);
+}
+
 const void* EmbeddedResource(const wchar_t* name, size_t* size)
 {
     HRSRC r = FindResourceW(nullptr, name, MAKEINTRESOURCEW(10) /* RT_RCDATA */);
