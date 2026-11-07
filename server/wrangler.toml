@@ -7,7 +7,7 @@ compatibility_date = "2026-10-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "replayr"
-database_id = "PUT-YOUR-D1-DATABASE-ID-HERE"
+database_id = "6bc317e0-391f-4238-9254-972812c060cf"
 
 # Cloud clip uploads (optional). R2 is free up to 10 GB but Cloudflare asks for a card to enable it,
 # so it's off by default. To turn it on: create the bucket, then uncomment these three lines.
